@@ -1,0 +1,107 @@
+import cors from "cors";
+import express from "express";
+import helmet from "helmet";
+import { createServer } from "http";
+import rateLimit from "express-rate-limit";
+import { schedulesRouter } from "./modules/schedules/routes";
+import { initializeWebSocket, getWebSocketServer } from "./lib/websocket";
+
+const app = express();
+const httpServer = createServer(app);
+const PORT = Number(process.env.PORT ?? 4000);
+const NODE_ENV = process.env.NODE_ENV ?? "development";
+const isProduction = NODE_ENV === "production";
+const ADMIN_API_KEY = (process.env.ADMIN_API_KEY ?? "").trim();
+const allowedOrigins = (process.env.CORS_ORIGINS ?? "http://localhost:3000")
+  .split(",")
+  .map((origin) => origin.trim())
+  .filter(Boolean);
+
+if (isProduction && !ADMIN_API_KEY) {
+  throw new Error("ADMIN_API_KEY es obligatoria en produccion");
+}
+
+// Initialize WebSocket
+const io = initializeWebSocket(httpServer);
+console.log("✅ WebSocket inicializado");
+
+app.disable("x-powered-by");
+app.set("trust proxy", isProduction ? 1 : false);
+
+app.use(
+  helmet({
+    crossOriginResourcePolicy: { policy: "cross-origin" },
+  })
+);
+
+app.use(
+  cors({
+    origin: (origin, callback) => {
+      if (!origin) {
+        callback(null, true);
+        return;
+      }
+      if (allowedOrigins.includes(origin)) {
+        callback(null, true);
+        return;
+      }
+      callback(new Error("CORS origin no permitido"));
+    },
+    credentials: true,
+    methods: ["GET", "POST", "PUT", "PATCH", "DELETE", "OPTIONS"],
+    allowedHeaders: ["Content-Type", "Authorization"],
+  })
+);
+
+app.use(
+  rateLimit({
+    windowMs: 15 * 60 * 1000,
+    max: isProduction ? 600 : 5000,
+    standardHeaders: true,
+    legacyHeaders: false,
+  })
+);
+
+app.use(express.json({ limit: "2mb" }));
+
+app.get("/api/health", (_req, res) => {
+  res.json({ ok: true, service: "unac-bolivar-horarios-backend" });
+});
+
+app.get("/api/ws-status", (_req, res) => {
+  if (isProduction) {
+    res.status(404).json({ error: "No encontrado" });
+    return;
+  }
+
+  const wsServer = getWebSocketServer();
+  res.json({
+    wsInitialized: !!wsServer,
+    wsConnected: wsServer?.engine?.clientsCount ?? 0,
+    timestamp: new Date().toISOString(),
+  });
+});
+
+app.use("/api/schedules", schedulesRouter);
+
+app.use((error: unknown, _req: express.Request, res: express.Response, _next: express.NextFunction) => {
+  const message = error instanceof Error ? error.message : "Error interno del servidor";
+
+  if (message.toLowerCase().includes("cors")) {
+    res.status(403).json({ error: "Solicitud bloqueada por politica de seguridad CORS" });
+    return;
+  }
+
+  if (!isProduction) {
+    console.error("[backend-error]", error);
+    res.status(500).json({ error: message });
+    return;
+  }
+
+  res.status(500).json({ error: "Error interno del servidor" });
+});
+
+httpServer.listen(PORT, () => {
+  // eslint-disable-next-line no-console
+  console.log(`Backend corriendo en http://localhost:${PORT}`);
+});

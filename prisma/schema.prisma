@@ -1,0 +1,89 @@
+// This is your Prisma schema file,
+// learn more about it in the docs: https://pris.ly/d/prisma-schema
+
+// Get a free hosted Postgres database in seconds: `npx create-db`
+
+generator client {
+  provider = "prisma-client-js"
+}
+
+datasource db {
+  provider = "postgresql"
+}
+
+enum DiaSemanaEnum {
+  Lunes
+  Martes
+  Miercoles
+  Jueves
+  Viernes
+  Sabado
+  Domingo
+
+  @@map("dia_semana_enum")
+}
+
+model Facultad {
+  id      String   @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
+  nombre  String   @unique @db.VarChar(100)
+  eventos Evento[]
+
+  @@map("facultades")
+}
+
+model Salon {
+  id        String         @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
+  nombre    String         @unique @map("nombre_bloque") @db.VarChar(120)
+  piso      Int?
+  capacidad Int?
+  horarios  HorarioEvento[]
+
+  @@map("salones")
+}
+
+model TipoReserva {
+  id      Int      @id
+  nombre  String   @unique @db.VarChar(50)
+  eventos Evento[]
+
+  @@map("tipos_reserva")
+}
+
+model Evento {
+  id             String          @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
+  tipoReservaId  Int             @map("tipo_reserva_id")
+  facultadId     String?         @map("facultad_id") @db.Uuid
+  codigoMateria  String?         @map("codigo_materia") @db.VarChar(20)
+  nombrePrincipal String         @map("nombre_principal") @db.VarChar(255)
+  responsable    String          @db.VarChar(150)
+  actividad      String?         @db.VarChar(255)
+  fechaInicio    DateTime        @map("fecha_inicio") @db.Date
+  fechaFin       DateTime        @map("fecha_fin") @db.Date
+  fechaCreacion  DateTime        @default(now()) @map("fecha_creacion") @db.Timestamptz(6)
+
+  tipoReserva TipoReserva   @relation(fields: [tipoReservaId], references: [id])
+  facultad    Facultad?     @relation(fields: [facultadId], references: [id])
+  horarios    HorarioEvento[]
+
+  @@index([tipoReservaId])
+  @@index([facultadId])
+  @@index([fechaInicio, fechaFin])
+  @@map("eventos")
+}
+
+model HorarioEvento {
+  id         String       @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
+  eventoId   String       @map("evento_id") @db.Uuid
+  salonId    String       @map("salon_id") @db.Uuid
+  diaSemana  DiaSemanaEnum @map("dia_semana")
+  horaInicio DateTime     @map("hora_inicio") @db.Time(6)
+  horaFin    DateTime     @map("hora_fin") @db.Time(6)
+
+  evento Evento @relation(fields: [eventoId], references: [id], onDelete: Cascade)
+  salon  Salon  @relation(fields: [salonId], references: [id])
+
+  @@index([eventoId])
+  @@index([salonId, diaSemana])
+  @@index([horaInicio, horaFin])
+  @@map("horarios_evento")
+}
