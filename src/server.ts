@@ -4,6 +4,7 @@ import helmet from "helmet";
 import { createServer } from "http";
 import rateLimit from "express-rate-limit";
 import { schedulesRouter } from "./modules/schedules/routes";
+import { auditorioRouter } from "./modules/auditorio/routes";
 import { initializeWebSocket, getWebSocketServer } from "./lib/websocket";
 
 const app = express();
@@ -12,7 +13,10 @@ const PORT = Number(process.env.PORT ?? 4000);
 const NODE_ENV = process.env.NODE_ENV ?? "development";
 const isProduction = NODE_ENV === "production";
 const ADMIN_API_KEY = (process.env.ADMIN_API_KEY ?? "").trim();
-const allowedOrigins = (process.env.CORS_ORIGINS ?? "http://localhost:3000")
+const allowedOrigins = (
+  process.env.CORS_ORIGINS ??
+  "http://localhost:3000,http://localhost:3001,http://127.0.0.1:3000,http://127.0.0.1:3001"
+)
   .split(",")
   .map((origin) => origin.trim())
   .filter(Boolean);
@@ -83,6 +87,7 @@ app.get("/api/ws-status", (_req, res) => {
 });
 
 app.use("/api/schedules", schedulesRouter);
+app.use("/api/auditorio", auditorioRouter);
 
 app.use((error: unknown, _req: express.Request, res: express.Response, _next: express.NextFunction) => {
   const message = error instanceof Error ? error.message : "Error interno del servidor";

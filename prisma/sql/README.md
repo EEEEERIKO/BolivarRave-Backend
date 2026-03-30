@@ -7,6 +7,7 @@ This folder has historical SQL plus hardening patches. For a new PostgreSQL serv
 Run only:
 
 - [007_portable_full_migration.sql](007_portable_full_migration.sql)
+- [008_auditorio_reservas_schema.sql](008_auditorio_reservas_schema.sql)
 
 This single file creates:
 
@@ -17,6 +18,13 @@ This single file creates:
 - Supabase linter hardening (`search_path` and extension schema)
 - RLS hardening (role-aware; safe outside Supabase)
 - Base seed data (facultades + official salones catalog)
+
+And [008_auditorio_reservas_schema.sql](008_auditorio_reservas_schema.sql) creates:
+
+- `reservas_auditorio`
+- `horarios_intercalados_auditorio`
+- enum `auditorio_estado_enum`
+- validation/overlap triggers for auditorio bookings
 
 ## What each existing SQL file is for
 
@@ -33,6 +41,7 @@ This single file creates:
 
 1. Clean new server (recommended):
    - Execute [007_portable_full_migration.sql](007_portable_full_migration.sql)
+   - Execute [008_auditorio_reservas_schema.sql](008_auditorio_reservas_schema.sql)
 
 2. Existing Supabase DB with data already loaded:
    - Keep historical files for audit only.

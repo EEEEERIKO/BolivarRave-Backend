@@ -588,7 +588,14 @@ export const createScheduleEvent = async (payload: CreateScheduleEventInput) => 
       }
     });
 
-    const facultadId = await resolveFacultadId(tx, facultyIdByName, payload.faculty);
+    const reservationTypeId = reservationTypeToId(payload.reservationType);
+    const isIglesiaReservation = reservationTypeId === RESERVA_IGLESIA_ID;
+
+    const facultadId = isIglesiaReservation
+      ? null
+      : await resolveFacultadId(tx, facultyIdByName, payload.faculty);
+    const materialCode = isIglesiaReservation ? null : payload.code;
+    const activity = isIglesiaReservation ? payload.subject : null;
 
     const evento = await tx.$queryRaw<Array<{ id: string }>>`
       INSERT INTO public.eventos (
@@ -602,12 +609,12 @@ export const createScheduleEvent = async (payload: CreateScheduleEventInput) => 
         fecha_fin
       )
       VALUES (
-        ${reservationTypeToId(payload.reservationType)},
+        ${reservationTypeId},
         ${facultadId}::uuid,
-        ${payload.code},
+        ${materialCode},
         ${payload.subject},
         ${payload.teacher},
-        ${null},
+        ${activity},
         ${toIsoDate(payload.startDate)}::date,
         ${toIsoDate(payload.endDate)}::date
       )
@@ -669,7 +676,25 @@ export const updateScheduleEventSlot = async (payload: UpdateScheduleEventSlotIn
     `;
     salones.forEach((salon) => roomIdByName.set(salon.nombre, salon.id));
 
-    const facultadId = await resolveFacultadId(tx, facultyIdByName, payload.faculty);
+    const currentEvent = await tx.$queryRaw<Array<{ tipo_reserva_id: number }>>`
+      SELECT tipo_reserva_id
+      FROM public.eventos
+      WHERE id = ${payload.eventId}::uuid
+      LIMIT 1
+    `;
+
+    const currentReservationTypeId = currentEvent[0]?.tipo_reserva_id;
+    if (!currentReservationTypeId) {
+      throw new Error("No se encontro el evento a modificar");
+    }
+
+    const isIglesiaReservation = currentReservationTypeId === RESERVA_IGLESIA_ID;
+    const facultadId = isIglesiaReservation
+      ? null
+      : await resolveFacultadId(tx, facultyIdByName, payload.faculty);
+    const materialCode = isIglesiaReservation ? null : payload.code;
+    const activity = isIglesiaReservation ? payload.subject : null;
+
     const resolvedRoomName = canonicalRoomName(payload.room);
     if (!resolvedRoomName) {
       throw new Error(`El salon '${payload.room}' no pertenece al catalogo oficial`);
@@ -680,9 +705,10 @@ export const updateScheduleEventSlot = async (payload: UpdateScheduleEventSlotIn
       UPDATE public.eventos
       SET
         facultad_id = ${facultadId}::uuid,
-        codigo_materia = ${payload.code},
+        codigo_materia = ${materialCode},
         nombre_principal = ${payload.subject},
         responsable = ${payload.teacher},
+        actividad = ${activity},
         fecha_inicio = ${toIsoDate(payload.startDate)}::date,
         fecha_fin = ${toIsoDate(payload.endDate)}::date
       WHERE id = ${payload.eventId}::uuid

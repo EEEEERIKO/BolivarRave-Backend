@@ -16,6 +16,7 @@ import {
 } from "./service";
 
 const ADMIN_API_KEY = (process.env.ADMIN_API_KEY ?? "").trim();
+const isProduction = process.env.NODE_ENV === "production";
 
 const upload = multer({
   storage: multer.memoryStorage(),
@@ -114,7 +115,50 @@ const toLocalDate = (isoDate: string) => {
   return new Date(y ?? 0, (m ?? 1) - 1, d ?? 1);
 };
 
+const handleKnownScheduleWriteError = (error: unknown, res: import("express").Response) => {
+  if (!(error instanceof Error)) {
+    return false;
+  }
+
+  const message = error.message.toLowerCase();
+
+  if (message.includes("classslot_no_overlap") || message.includes("overlap") || message.includes("solap")) {
+    res.status(409).json({
+      error: "La reserva se solapa con otra clase en el mismo salon y horario.",
+    });
+    return true;
+  }
+
+  if (message.includes("iglesia no debe tener facultad_id")) {
+    res.status(400).json({
+      error: "Las reservas de Iglesia no deben incluir facultad.",
+    });
+    return true;
+  }
+
+  if (message.includes("iglesia no debe tener codigo_materia")) {
+    res.status(400).json({
+      error: "Las reservas de Iglesia no deben incluir codigo de materia.",
+    });
+    return true;
+  }
+
+  if (message.includes("iglesia requiere actividad")) {
+    res.status(400).json({
+      error: "Las reservas de Iglesia requieren una actividad.",
+    });
+    return true;
+  }
+
+  return false;
+};
+
 const requireAdminKey: import("express").RequestHandler = (req, res, next) => {
+  // Solo requiere API key en producción
+  if (!isProduction) {
+    return next();
+  }
+
   if (!ADMIN_API_KEY) {
     return res.status(503).json({
       error: "ADMIN_API_KEY no configurada en backend",
@@ -256,6 +300,10 @@ schedulesRouter.post("/events", requireAdminKey, async (req, res, next) => {
       });
     }
 
+    if (handleKnownScheduleWriteError(error, res)) {
+      return;
+    }
+
     return next(error);
   }
 });
@@ -289,6 +337,10 @@ schedulesRouter.put("/events/:eventId/:slotId", requireAdminKey, async (req, res
       return res.status(400).json({
         error: `Payload de actualizacion invalido: ${error.issues[0]?.message ?? "error de validacion"}`,
       });
+    }
+
+    if (handleKnownScheduleWriteError(error, res)) {
+      return;
     }
 
     return next(error);
