@@ -5,6 +5,7 @@ import { createServer } from "http";
 import rateLimit from "express-rate-limit";
 import { schedulesRouter } from "./modules/schedules/routes";
 import { auditorioRouter } from "./modules/auditorio/routes";
+import { staffRouter } from "./modules/staff/routes";
 import { initializeWebSocket, getWebSocketServer } from "./lib/websocket";
 
 const app = express();
@@ -88,6 +89,7 @@ app.get("/api/ws-status", (_req, res) => {
 
 app.use("/api/schedules", schedulesRouter);
 app.use("/api/auditorio", auditorioRouter);
+app.use("/api/staff", staffRouter);
 
 app.use((error: unknown, _req: express.Request, res: express.Response, _next: express.NextFunction) => {
   const message = error instanceof Error ? error.message : "Error interno del servidor";

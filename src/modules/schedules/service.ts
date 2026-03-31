@@ -42,6 +42,14 @@ type UpdateScheduleEventSlotInput = {
   endTime: string;
 };
 
+type SearchAvailableRoomsInput = {
+  date: string;
+  day: string;
+  startTime: string;
+  endTime: string;
+  minCapacity: number;
+};
+
 const ensureImportsHistoryTable = async () => {
   await prisma.$executeRawUnsafe(`
     CREATE TABLE IF NOT EXISTS public.schedule_import_history (
@@ -905,4 +913,32 @@ export const getRooms = async () => {
 
   // Return only the official room catalog in the exact order requested by business rules.
   return roomDisplayOrder.filter((room) => roomKeysInDb.has(roomKey(room)));
+};
+
+export const findAvailableRooms = async (payload: SearchAvailableRoomsInput) => {
+  const rows = await prisma.$queryRaw<Array<{ room: string; capacity: number; floor: number }>>`
+    SELECT
+      s.nombre_bloque AS room,
+      COALESCE(s.capacidad, 0) AS capacity,
+      COALESCE(s.piso, 0) AS floor
+    FROM public.salones s
+    WHERE COALESCE(s.capacidad, 0) >= ${payload.minCapacity}
+      AND NOT EXISTS (
+        SELECT 1
+        FROM public.horarios_evento h
+        INNER JOIN public.eventos e ON e.id = h.evento_id
+        WHERE h.salon_id = s.id
+          AND h.dia_semana = ${payload.day}::public.dia_semana_enum
+          AND e.fecha_inicio <= ${payload.date}::date
+          AND e.fecha_fin >= ${payload.date}::date
+          AND (${payload.startTime}::time < h.hora_fin AND h.hora_inicio < ${payload.endTime}::time)
+      )
+    ORDER BY COALESCE(s.capacidad, 0) ASC, COALESCE(s.piso, 0) ASC, s.nombre_bloque ASC
+  `;
+
+  return rows.map((row) => ({
+    room: canonicalRoomName(row.room) ?? row.room,
+    capacity: Number(row.capacity ?? 0),
+    floor: Number(row.floor ?? 0),
+  }));
 };

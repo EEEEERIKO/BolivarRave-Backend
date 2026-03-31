@@ -8,6 +8,8 @@ Run only:
 
 - [007_portable_full_migration.sql](007_portable_full_migration.sql)
 - [008_auditorio_reservas_schema.sql](008_auditorio_reservas_schema.sql)
+- [009_staff_schema.sql](009_staff_schema.sql)
+- [010_staff_role_id.sql](010_staff_role_id.sql)
 
 This single file creates:
 
@@ -25,6 +27,19 @@ And [008_auditorio_reservas_schema.sql](008_auditorio_reservas_schema.sql) creat
 - `horarios_intercalados_auditorio`
 - enum `auditorio_estado_enum`
 - validation/overlap triggers for auditorio bookings
+
+And [009_staff_schema.sql](009_staff_schema.sql) creates:
+
+- `staff`
+- `staff_bloqueos_clase`
+- enum `staff_estado_enum`
+- constraints/indexes for contract plans, status, and class-unavailability blocks
+
+And [010_staff_role_id.sql](010_staff_role_id.sql) adds:
+
+- `staff_roles` catalog table (`Admin`, `Monitor`, `Colaborador`)
+- `staff.role_id` as FK to `staff_roles`
+- backfill/default compatibility for existing rows
 
 ## What each existing SQL file is for
 

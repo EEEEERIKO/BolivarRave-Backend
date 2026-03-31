@@ -8,6 +8,7 @@ import {
   clearAllSchedules,
   createScheduleEvent,
   deleteScheduleEventSlot,
+  findAvailableRooms,
   getImportsHistory,
   getRooms,
   getScheduleEvents,
@@ -110,9 +111,29 @@ const updateEventSchema = z.object({
   end: z.string().regex(/^\d{2}:\d{2}$/),
 });
 
+const availableRoomsQuerySchema = z.object({
+  date: z.string().regex(/^\d{4}-\d{2}-\d{2}$/),
+  start: z.string().regex(/^\d{2}:\d{2}$/),
+  end: z.string().regex(/^\d{2}:\d{2}$/),
+  capacity: z.coerce.number().int().min(1).max(1000),
+});
+
 const toLocalDate = (isoDate: string) => {
   const [y, m, d] = isoDate.split("-").map(Number);
   return new Date(y ?? 0, (m ?? 1) - 1, d ?? 1);
+};
+
+const toMinutes = (value: string) => {
+  const [hour, minute] = value.split(":").map(Number);
+  return (hour ?? 0) * 60 + (minute ?? 0);
+};
+
+const weekDayFromIsoDate = (isoDate: string) => {
+  const [y, m, d] = isoDate.split("-").map(Number);
+  const date = new Date(y ?? 0, (m ?? 1) - 1, d ?? 1);
+  const day = date.getDay();
+  const names = ["Domingo", "Lunes", "Martes", "Miercoles", "Jueves", "Viernes", "Sabado"] as const;
+  return names[day] ?? "Lunes";
 };
 
 const handleKnownScheduleWriteError = (error: unknown, res: import("express").Response) => {
@@ -372,6 +393,34 @@ schedulesRouter.get("/rooms", async (_req, res, next) => {
     const rooms = await getRooms();
     return res.json({ rooms });
   } catch (error) {
+    return next(error);
+  }
+});
+
+schedulesRouter.get("/rooms/available", async (req, res, next) => {
+  try {
+    const parsed = availableRoomsQuerySchema.parse(req.query);
+
+    if (toMinutes(parsed.end) <= toMinutes(parsed.start)) {
+      return res.status(400).json({ error: "La hora fin debe ser mayor a la hora inicio." });
+    }
+
+    const rooms = await findAvailableRooms({
+      date: parsed.date,
+      day: weekDayFromIsoDate(parsed.date),
+      startTime: parsed.start,
+      endTime: parsed.end,
+      minCapacity: parsed.capacity,
+    });
+
+    return res.json({ rooms });
+  } catch (error) {
+    if (error instanceof z.ZodError) {
+      return res.status(400).json({
+        error: `Parametros invalidos: ${error.issues[0]?.message ?? "error de validacion"}`,
+      });
+    }
+
     return next(error);
   }
 });
