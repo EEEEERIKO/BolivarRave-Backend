@@ -2,12 +2,21 @@ import { Router } from "express";
 import { z } from "zod";
 import { broadcastScheduleRefresh } from "../../lib/websocket";
 import {
+  createStaffPausaProgramada,
   createStaff,
+  deleteStaffPausaProgramada,
   deleteStaff,
+  getStaffHorarioLaboral,
+  getStaffResumenContrato,
   getStaffById,
+  listStaffJornadaSemanal,
+  listStaffPausasProgramadas,
   listStaff,
+  replaceStaffJornadaSemanal,
+  updateStaffPausaProgramada,
   updateStaff,
   updateStaffEstado,
+  upsertStaffResumenContrato,
   type StaffEstado,
 } from "./service";
 
@@ -50,6 +59,31 @@ const createUpdateStaffBodySchema = z.object({
 
 const patchEstadoBodySchema = z.object({
   estado: z.enum(["Active", "Inactive"]),
+});
+
+const tipoPausaEnum = ["Comida", "Descanso"] as const;
+
+const jornadaSchema = z.object({
+  diaSemana: z.enum(weekDays),
+  horaEntrada: z.string().regex(timeRegex, "Hora entrada invalida (HH:mm)"),
+  horaSalida: z.string().regex(timeRegex, "Hora salida invalida (HH:mm)"),
+  totalHorasDia: z.number().min(0).max(24),
+});
+
+const replaceJornadaBodySchema = z.object({
+  jornadas: z.array(jornadaSchema).max(7),
+});
+
+const pausaBodySchema = z.object({
+  diaSemana: z.enum(weekDays),
+  tipoPausa: z.enum(tipoPausaEnum),
+  horaInicio: z.string().regex(timeRegex, "Hora inicio invalida (HH:mm)"),
+  horaFin: z.string().regex(timeRegex, "Hora fin invalida (HH:mm)"),
+});
+
+const resumenContratoBodySchema = z.object({
+  horasSemanalesContrato: z.number().int().min(1).max(168),
+  balanceHoras: z.number().min(-10000).max(10000),
 });
 
 const requireAdminKey: import("express").RequestHandler = (req, res, next) => {
@@ -104,6 +138,27 @@ const validateBloqueosNoOverlap = (bloqueosClase: Array<{ diaSemana: string; hor
   }
 };
 
+const validateJornadas = (jornadas: Array<{ diaSemana: string; horaEntrada: string; horaSalida: string; totalHorasDia: number }>) => {
+  const seenDays = new Set<string>();
+
+  for (const jornada of jornadas) {
+    if (seenDays.has(jornada.diaSemana)) {
+      throw new Error(`Dia repetido en jornada: ${jornada.diaSemana}`);
+    }
+
+    seenDays.add(jornada.diaSemana);
+
+    if (toMinutes(jornada.horaSalida) <= toMinutes(jornada.horaEntrada)) {
+      throw new Error(`La jornada de ${jornada.diaSemana} tiene hora fin menor o igual a hora inicio`);
+    }
+
+    const bruto = (toMinutes(jornada.horaSalida) - toMinutes(jornada.horaEntrada)) / 60;
+    if (jornada.totalHorasDia > bruto + 0.01) {
+      throw new Error(`totalHorasDia excede el rango horario bruto en ${jornada.diaSemana}`);
+    }
+  }
+};
+
 const handleKnownStaffWriteError = (error: unknown, res: import("express").Response) => {
   if (!(error instanceof Error)) {
     return false;
@@ -128,6 +183,36 @@ const handleKnownStaffWriteError = (error: unknown, res: import("express").Respo
 
   if (message.includes("solape")) {
     res.status(400).json({ error: "Hay solape entre bloques de horario no disponible." });
+    return true;
+  }
+
+  return false;
+};
+
+const handleKnownStaffScheduleError = (error: unknown, res: import("express").Response) => {
+  if (!(error instanceof Error)) {
+    return false;
+  }
+
+  const message = error.message.toLowerCase();
+
+  if (message.includes("no se encontro el staff")) {
+    res.status(404).json({ error: "El staff solicitado no existe." });
+    return true;
+  }
+
+  if (message.includes("no se encontro la pausa")) {
+    res.status(404).json({ error: "La pausa solicitada no existe." });
+    return true;
+  }
+
+  if (message.includes("debe estar dentro de la jornada") || message.includes("no existe jornada")) {
+    res.status(400).json({ error: "La pausa debe pertenecer a un dia laboral y estar dentro del rango de jornada." });
+    return true;
+  }
+
+  if (message.includes("dia repetido") || message.includes("totalhorasdia") || message.includes("hora fin")) {
+    res.status(400).json({ error: error.message });
     return true;
   }
 
@@ -300,6 +385,227 @@ staffRouter.delete("/:id", requireAdminKey, async (req, res, next) => {
     }
 
     if (handleKnownStaffWriteError(error, res)) {
+      return;
+    }
+
+    return next(error);
+  }
+});
+
+staffRouter.get("/:id/jornada-semanal", async (req, res, next) => {
+  try {
+    const { id } = idParamsSchema.parse(req.params);
+    const jornadas = await listStaffJornadaSemanal(id);
+    return res.json({ jornadas });
+  } catch (error) {
+    if (error instanceof z.ZodError) {
+      return res.status(400).json({
+        error: `Parametros invalidos: ${error.issues[0]?.message ?? "error de validacion"}`,
+      });
+    }
+
+    if (handleKnownStaffScheduleError(error, res)) {
+      return;
+    }
+
+    return next(error);
+  }
+});
+
+staffRouter.put("/:id/jornada-semanal", requireAdminKey, async (req, res, next) => {
+  try {
+    const { id } = idParamsSchema.parse(req.params);
+    const parsed = replaceJornadaBodySchema.parse(req.body);
+    validateJornadas(parsed.jornadas);
+
+    const updated = await replaceStaffJornadaSemanal(id, parsed.jornadas);
+    broadcastScheduleRefresh();
+
+    return res.json({
+      message: "Jornada semanal actualizada correctamente",
+      staffId: updated.staffId,
+    });
+  } catch (error) {
+    if (error instanceof z.ZodError) {
+      return res.status(400).json({
+        error: `Payload invalido: ${error.issues[0]?.message ?? "error de validacion"}`,
+      });
+    }
+
+    if (handleKnownStaffScheduleError(error, res)) {
+      return;
+    }
+
+    return next(error);
+  }
+});
+
+staffRouter.get("/:id/pausas-programadas", async (req, res, next) => {
+  try {
+    const { id } = idParamsSchema.parse(req.params);
+    const pausas = await listStaffPausasProgramadas(id);
+    return res.json({ pausas });
+  } catch (error) {
+    if (error instanceof z.ZodError) {
+      return res.status(400).json({
+        error: `Parametros invalidos: ${error.issues[0]?.message ?? "error de validacion"}`,
+      });
+    }
+
+    if (handleKnownStaffScheduleError(error, res)) {
+      return;
+    }
+
+    return next(error);
+  }
+});
+
+staffRouter.post("/:id/pausas-programadas", requireAdminKey, async (req, res, next) => {
+  try {
+    const { id } = idParamsSchema.parse(req.params);
+    const parsed = pausaBodySchema.parse(req.body);
+
+    const created = await createStaffPausaProgramada(id, parsed);
+    broadcastScheduleRefresh();
+
+    return res.status(201).json({
+      message: "Pausa programada creada correctamente",
+      id: created.id,
+    });
+  } catch (error) {
+    if (error instanceof z.ZodError) {
+      return res.status(400).json({
+        error: `Payload invalido: ${error.issues[0]?.message ?? "error de validacion"}`,
+      });
+    }
+
+    if (handleKnownStaffScheduleError(error, res)) {
+      return;
+    }
+
+    return next(error);
+  }
+});
+
+staffRouter.put("/:id/pausas-programadas/:pausaId", requireAdminKey, async (req, res, next) => {
+  try {
+    const { id, pausaId } = z.object({
+      id: z.string().uuid(),
+      pausaId: z.string().uuid(),
+    }).parse(req.params);
+    const parsed = pausaBodySchema.parse(req.body);
+
+    const updated = await updateStaffPausaProgramada(id, pausaId, parsed);
+    broadcastScheduleRefresh();
+
+    return res.json({
+      message: "Pausa programada actualizada correctamente",
+      id: updated.id,
+    });
+  } catch (error) {
+    if (error instanceof z.ZodError) {
+      return res.status(400).json({
+        error: `Payload/parametros invalidos: ${error.issues[0]?.message ?? "error de validacion"}`,
+      });
+    }
+
+    if (handleKnownStaffScheduleError(error, res)) {
+      return;
+    }
+
+    return next(error);
+  }
+});
+
+staffRouter.delete("/:id/pausas-programadas/:pausaId", requireAdminKey, async (req, res, next) => {
+  try {
+    const { id, pausaId } = z.object({
+      id: z.string().uuid(),
+      pausaId: z.string().uuid(),
+    }).parse(req.params);
+
+    const deleted = await deleteStaffPausaProgramada(id, pausaId);
+    broadcastScheduleRefresh();
+
+    return res.json({
+      message: "Pausa programada eliminada correctamente",
+      id: deleted.id,
+    });
+  } catch (error) {
+    if (error instanceof z.ZodError) {
+      return res.status(400).json({
+        error: `Parametros invalidos: ${error.issues[0]?.message ?? "error de validacion"}`,
+      });
+    }
+
+    if (handleKnownStaffScheduleError(error, res)) {
+      return;
+    }
+
+    return next(error);
+  }
+});
+
+staffRouter.get("/:id/resumen-contrato", async (req, res, next) => {
+  try {
+    const { id } = idParamsSchema.parse(req.params);
+    const resumen = await getStaffResumenContrato(id);
+    return res.json({ resumen });
+  } catch (error) {
+    if (error instanceof z.ZodError) {
+      return res.status(400).json({
+        error: `Parametros invalidos: ${error.issues[0]?.message ?? "error de validacion"}`,
+      });
+    }
+
+    if (handleKnownStaffScheduleError(error, res)) {
+      return;
+    }
+
+    return next(error);
+  }
+});
+
+staffRouter.put("/:id/resumen-contrato", requireAdminKey, async (req, res, next) => {
+  try {
+    const { id } = idParamsSchema.parse(req.params);
+    const parsed = resumenContratoBodySchema.parse(req.body);
+
+    const updated = await upsertStaffResumenContrato(id, parsed);
+    broadcastScheduleRefresh();
+
+    return res.json({
+      message: "Resumen de contrato actualizado correctamente",
+      staffId: updated.staffId,
+    });
+  } catch (error) {
+    if (error instanceof z.ZodError) {
+      return res.status(400).json({
+        error: `Payload invalido: ${error.issues[0]?.message ?? "error de validacion"}`,
+      });
+    }
+
+    if (handleKnownStaffScheduleError(error, res)) {
+      return;
+    }
+
+    return next(error);
+  }
+});
+
+staffRouter.get("/:id/horario-laboral", async (req, res, next) => {
+  try {
+    const { id } = idParamsSchema.parse(req.params);
+    const horarioLaboral = await getStaffHorarioLaboral(id);
+    return res.json({ horarioLaboral });
+  } catch (error) {
+    if (error instanceof z.ZodError) {
+      return res.status(400).json({
+        error: `Parametros invalidos: ${error.issues[0]?.message ?? "error de validacion"}`,
+      });
+    }
+
+    if (handleKnownStaffScheduleError(error, res)) {
       return;
     }
 

@@ -8,6 +8,25 @@ export type StaffBloqueoClaseInput = {
   horaFin: string;
 };
 
+export type StaffJornadaInput = {
+  diaSemana: string;
+  horaEntrada: string;
+  horaSalida: string;
+  totalHorasDia: number;
+};
+
+export type StaffPausaInput = {
+  diaSemana: string;
+  tipoPausa: "Comida" | "Descanso";
+  horaInicio: string;
+  horaFin: string;
+};
+
+export type StaffResumenContratoInput = {
+  horasSemanalesContrato: number;
+  balanceHoras: number;
+};
+
 export type CreateStaffInput = {
   numeroStaff: number;
   roleId: number;
@@ -49,6 +68,30 @@ type StaffRawRow = {
   bloqueo_dia_semana: string | null;
   bloqueo_hora_inicio: string | null;
   bloqueo_hora_fin: string | null;
+};
+
+type StaffJornadaRawRow = {
+  id: string;
+  staff_id: string;
+  dia_semana: string;
+  hora_entrada: string;
+  hora_salida: string;
+  total_horas_dia: number;
+};
+
+type StaffPausaRawRow = {
+  id: string;
+  staff_id: string;
+  dia_semana: string;
+  tipo_pausa: "Comida" | "Descanso";
+  hora_inicio: string;
+  hora_fin: string;
+};
+
+type StaffResumenContratoRawRow = {
+  staff_id: string;
+  horas_semanales_contrato: number;
+  balance_horas: number;
 };
 
 const toIsoDate = (value: Date) => value.toISOString().slice(0, 10);
@@ -344,4 +387,318 @@ export const deleteStaff = async (id: string) => {
   }
 
   return { staffId: id };
+};
+
+const toMinutes = (value: string) => {
+  const [hour, minute] = value.split(":").map(Number);
+  return (hour ?? 0) * 60 + (minute ?? 0);
+};
+
+const validatePausaInsideJornada = (
+  pausa: StaffPausaInput,
+  jornadaByDay: Map<string, StaffJornadaRawRow>,
+) => {
+  const jornada = jornadaByDay.get(pausa.diaSemana);
+  if (!jornada) {
+    throw new Error(`No existe jornada para ${pausa.diaSemana}`);
+  }
+
+  const jornadaStart = toMinutes(jornada.hora_entrada);
+  const jornadaEnd = toMinutes(jornada.hora_salida);
+  const pausaStart = toMinutes(pausa.horaInicio);
+  const pausaEnd = toMinutes(pausa.horaFin);
+
+  if (pausaStart < jornadaStart || pausaEnd > jornadaEnd) {
+    throw new Error(`La pausa de ${pausa.diaSemana} debe estar dentro de la jornada laboral`);
+  }
+};
+
+const assertStaffExists = async (staffId: string) => {
+  const existing = await prisma.$queryRaw<Array<{ id: string }>>`
+    SELECT id::text AS id
+    FROM public.staff
+    WHERE id = ${staffId}::uuid
+    LIMIT 1
+  `;
+
+  if (!existing[0]?.id) {
+    throw new Error("No se encontro el staff solicitado");
+  }
+};
+
+export const listStaffJornadaSemanal = async (staffId: string) => {
+  await assertStaffExists(staffId);
+
+  const rows = await prisma.$queryRaw<StaffJornadaRawRow[]>`
+    SELECT
+      j.id::text AS id,
+      j.staff_id::text AS staff_id,
+      j.dia_semana::text AS dia_semana,
+      TO_CHAR(j.hora_entrada, 'HH24:MI') AS hora_entrada,
+      TO_CHAR(j.hora_salida, 'HH24:MI') AS hora_salida,
+      j.total_horas_dia::float8 AS total_horas_dia
+    FROM public.staff_jornada_semanal j
+    WHERE j.staff_id = ${staffId}::uuid
+    ORDER BY j.dia_semana::text ASC
+  `;
+
+  return rows.map((row) => ({
+    id: row.id,
+    staffId: row.staff_id,
+    diaSemana: row.dia_semana,
+    horaEntrada: row.hora_entrada,
+    horaSalida: row.hora_salida,
+    totalHorasDia: row.total_horas_dia,
+  }));
+};
+
+export const replaceStaffJornadaSemanal = async (staffId: string, jornadas: StaffJornadaInput[]) => {
+  return prisma.$transaction(async (tx) => {
+    const existing = await tx.$queryRaw<Array<{ id: string }>>`
+      SELECT id::text AS id
+      FROM public.staff
+      WHERE id = ${staffId}::uuid
+      LIMIT 1
+    `;
+
+    if (!existing[0]?.id) {
+      throw new Error("No se encontro el staff solicitado");
+    }
+
+    await tx.$executeRaw`
+      DELETE FROM public.staff_jornada_semanal
+      WHERE staff_id = ${staffId}::uuid
+    `;
+
+    for (const jornada of jornadas) {
+      await tx.$executeRaw`
+        INSERT INTO public.staff_jornada_semanal (
+          staff_id,
+          dia_semana,
+          hora_entrada,
+          hora_salida,
+          total_horas_dia
+        )
+        VALUES (
+          ${staffId}::uuid,
+          ${jornada.diaSemana}::public.dia_semana_enum,
+          ${jornada.horaEntrada}::time,
+          ${jornada.horaSalida}::time,
+          ${jornada.totalHorasDia}
+        )
+      `;
+    }
+
+    return { staffId };
+  });
+};
+
+export const listStaffPausasProgramadas = async (staffId: string) => {
+  await assertStaffExists(staffId);
+
+  const rows = await prisma.$queryRaw<StaffPausaRawRow[]>`
+    SELECT
+      p.id::text AS id,
+      p.staff_id::text AS staff_id,
+      p.dia_semana::text AS dia_semana,
+      p.tipo_pausa::text AS tipo_pausa,
+      TO_CHAR(p.hora_inicio, 'HH24:MI') AS hora_inicio,
+      TO_CHAR(p.hora_fin, 'HH24:MI') AS hora_fin
+    FROM public.staff_pausas_programadas p
+    WHERE p.staff_id = ${staffId}::uuid
+    ORDER BY p.dia_semana::text ASC, p.hora_inicio ASC
+  `;
+
+  return rows.map((row) => ({
+    id: row.id,
+    staffId: row.staff_id,
+    diaSemana: row.dia_semana,
+    tipoPausa: row.tipo_pausa,
+    horaInicio: row.hora_inicio,
+    horaFin: row.hora_fin,
+  }));
+};
+
+export const createStaffPausaProgramada = async (staffId: string, payload: StaffPausaInput) => {
+  return prisma.$transaction(async (tx) => {
+    const existing = await tx.$queryRaw<Array<{ id: string }>>`
+      SELECT id::text AS id
+      FROM public.staff
+      WHERE id = ${staffId}::uuid
+      LIMIT 1
+    `;
+
+    if (!existing[0]?.id) {
+      throw new Error("No se encontro el staff solicitado");
+    }
+
+    const jornadas = await tx.$queryRaw<StaffJornadaRawRow[]>`
+      SELECT
+        id::text AS id,
+        staff_id::text AS staff_id,
+        dia_semana::text AS dia_semana,
+        TO_CHAR(hora_entrada, 'HH24:MI') AS hora_entrada,
+        TO_CHAR(hora_salida, 'HH24:MI') AS hora_salida,
+        total_horas_dia::float8 AS total_horas_dia
+      FROM public.staff_jornada_semanal
+      WHERE staff_id = ${staffId}::uuid
+    `;
+
+    const jornadaByDay = new Map(jornadas.map((item) => [item.dia_semana, item]));
+    validatePausaInsideJornada(payload, jornadaByDay);
+
+    const created = await tx.$queryRaw<Array<{ id: string }>>`
+      INSERT INTO public.staff_pausas_programadas (
+        staff_id,
+        tipo_pausa,
+        dia_semana,
+        hora_inicio,
+        hora_fin
+      )
+      VALUES (
+        ${staffId}::uuid,
+        ${payload.tipoPausa}::public.staff_tipo_pausa_enum,
+        ${payload.diaSemana}::public.dia_semana_enum,
+        ${payload.horaInicio}::time,
+        ${payload.horaFin}::time
+      )
+      RETURNING id::text AS id
+    `;
+
+    const id = created[0]?.id;
+    if (!id) {
+      throw new Error("No se pudo crear la pausa programada");
+    }
+
+    return { id };
+  });
+};
+
+export const updateStaffPausaProgramada = async (staffId: string, pausaId: string, payload: StaffPausaInput) => {
+  return prisma.$transaction(async (tx) => {
+    const existing = await tx.$queryRaw<Array<{ id: string }>>`
+      SELECT id::text AS id
+      FROM public.staff
+      WHERE id = ${staffId}::uuid
+      LIMIT 1
+    `;
+
+    if (!existing[0]?.id) {
+      throw new Error("No se encontro el staff solicitado");
+    }
+
+    const jornadas = await tx.$queryRaw<StaffJornadaRawRow[]>`
+      SELECT
+        id::text AS id,
+        staff_id::text AS staff_id,
+        dia_semana::text AS dia_semana,
+        TO_CHAR(hora_entrada, 'HH24:MI') AS hora_entrada,
+        TO_CHAR(hora_salida, 'HH24:MI') AS hora_salida,
+        total_horas_dia::float8 AS total_horas_dia
+      FROM public.staff_jornada_semanal
+      WHERE staff_id = ${staffId}::uuid
+    `;
+
+    const jornadaByDay = new Map(jornadas.map((item) => [item.dia_semana, item]));
+    validatePausaInsideJornada(payload, jornadaByDay);
+
+    const updated = await tx.$queryRaw<Array<{ id: string }>>`
+      UPDATE public.staff_pausas_programadas
+      SET
+        tipo_pausa = ${payload.tipoPausa}::public.staff_tipo_pausa_enum,
+        dia_semana = ${payload.diaSemana}::public.dia_semana_enum,
+        hora_inicio = ${payload.horaInicio}::time,
+        hora_fin = ${payload.horaFin}::time
+      WHERE id = ${pausaId}::uuid
+        AND staff_id = ${staffId}::uuid
+      RETURNING id::text AS id
+    `;
+
+    if (!updated[0]?.id) {
+      throw new Error("No se encontro la pausa programada");
+    }
+
+    return { id: updated[0].id };
+  });
+};
+
+export const deleteStaffPausaProgramada = async (staffId: string, pausaId: string) => {
+  const deleted = await prisma.$queryRaw<Array<{ id: string }>>`
+    DELETE FROM public.staff_pausas_programadas
+    WHERE id = ${pausaId}::uuid
+      AND staff_id = ${staffId}::uuid
+    RETURNING id::text AS id
+  `;
+
+  if (!deleted[0]?.id) {
+    throw new Error("No se encontro la pausa programada");
+  }
+
+  return { id: deleted[0].id };
+};
+
+export const getStaffResumenContrato = async (staffId: string) => {
+  await assertStaffExists(staffId);
+
+  const rows = await prisma.$queryRaw<StaffResumenContratoRawRow[]>`
+    SELECT
+      staff_id::text AS staff_id,
+      horas_semanales_contrato,
+      balance_horas::float8 AS balance_horas
+    FROM public.staff_resumen_contrato
+    WHERE staff_id = ${staffId}::uuid
+    LIMIT 1
+  `;
+
+  const row = rows[0];
+  if (!row) {
+    return null;
+  }
+
+  return {
+    staffId: row.staff_id,
+    horasSemanalesContrato: row.horas_semanales_contrato,
+    balanceHoras: row.balance_horas,
+  };
+};
+
+export const upsertStaffResumenContrato = async (staffId: string, payload: StaffResumenContratoInput) => {
+  const updated = await prisma.$queryRaw<Array<{ staff_id: string }>>`
+    INSERT INTO public.staff_resumen_contrato (
+      staff_id,
+      horas_semanales_contrato,
+      balance_horas
+    )
+    VALUES (
+      ${staffId}::uuid,
+      ${payload.horasSemanalesContrato},
+      ${payload.balanceHoras}
+    )
+    ON CONFLICT (staff_id)
+    DO UPDATE SET
+      horas_semanales_contrato = EXCLUDED.horas_semanales_contrato,
+      balance_horas = EXCLUDED.balance_horas
+    RETURNING staff_id::text AS staff_id
+  `;
+
+  if (!updated[0]?.staff_id) {
+    throw new Error("No se pudo guardar el resumen de contrato");
+  }
+
+  return { staffId: updated[0].staff_id };
+};
+
+export const getStaffHorarioLaboral = async (staffId: string) => {
+  const [jornada, pausas, resumen] = await Promise.all([
+    listStaffJornadaSemanal(staffId),
+    listStaffPausasProgramadas(staffId),
+    getStaffResumenContrato(staffId),
+  ]);
+
+  return {
+    staffId,
+    jornadaSemanal: jornada,
+    pausasProgramadas: pausas,
+    resumenContrato: resumen,
+  };
 };

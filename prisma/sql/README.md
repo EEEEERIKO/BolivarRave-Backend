@@ -10,6 +10,8 @@ Run only:
 - [008_auditorio_reservas_schema.sql](008_auditorio_reservas_schema.sql)
 - [009_staff_schema.sql](009_staff_schema.sql)
 - [010_staff_role_id.sql](010_staff_role_id.sql)
+- [011_tareas_schema.sql](011_tareas_schema.sql)
+- [012_staff_horario_laboral_schema.sql](012_staff_horario_laboral_schema.sql)
 
 This single file creates:
 
@@ -40,6 +42,25 @@ And [010_staff_role_id.sql](010_staff_role_id.sql) adds:
 - `staff_roles` catalog table (`Admin`, `Monitor`, `Colaborador`)
 - `staff.role_id` as FK to `staff_roles`
 - backfill/default compatibility for existing rows
+
+And [011_tareas_schema.sql](011_tareas_schema.sql) creates:
+
+- `habilidades` (catalog dependency for task skill FKs)
+- `staff_habilidades`
+- `tareas_catalogo`
+- `tareas_instancias`
+- `tareas_asignaciones`
+- enums and indexes for task workflow (`tipo`, `prioridad`, `estado`)
+- review traceability fields in assignments (`monitor_id`, `fecha_revision`, `observaciones_revision`)
+- review/rework states in `tarea_estado_enum` (`En Revision`, `Rechazada`, `Corregir`)
+
+And [012_staff_horario_laboral_schema.sql](012_staff_horario_laboral_schema.sql) creates:
+
+- `staff_jornada_semanal` (weekly working skeleton by day and entry/exit times)
+- `staff_pausas_programadas` (programmed breaks by day and pause type)
+- `staff_resumen_contrato` (weekly contract target and hour balance)
+- enum `staff_tipo_pausa_enum` (`Comida`, `Descanso`)
+- constraints and indexes for day/time consistency and staff relations
 
 ## What each existing SQL file is for
 
