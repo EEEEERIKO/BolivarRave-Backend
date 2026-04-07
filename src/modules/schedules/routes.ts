@@ -118,6 +118,20 @@ const availableRoomsQuerySchema = z.object({
   capacity: z.coerce.number().int().min(1).max(1000),
 });
 
+type RoomsInfoRawRow = {
+  salon_id: string;
+  salon_nombre: string;
+  salon_piso: number | null;
+  salon_capacidad: number | null;
+  dia_semana: string | null;
+  hora_inicio: string | null;
+  hora_fin: string | null;
+  nombre_principal: string | null;
+  responsable: string | null;
+  codigo_materia: string | null;
+  actividad: string | null;
+};
+
 const toLocalDate = (isoDate: string) => {
   const [y, m, d] = isoDate.split("-").map(Number);
   return new Date(y ?? 0, (m ?? 1) - 1, d ?? 1);
@@ -450,67 +464,71 @@ schedulesRouter.delete("/all", requireAdminKey, async (_req, res, next) => {
 schedulesRouter.get("/rooms-info", async (_req, res, next) => {
   try {
     const { prisma } = await import("../../lib/prisma");
-    
+
     // Get today's date for proper comparison
     const today = new Date();
     today.setHours(0, 0, 0, 0);
-    
-    // Obtener todas las salas con sus horarios
-    const salones = await prisma.salon.findMany({
-      select: {
-        id: true,
-        nombre: true,
-        piso: true,
-        capacidad: true,
-        horarios: {
-          select: {
-            diaSemana: true,
-            horaInicio: true,
-            horaFin: true,
-            evento: {
-              select: {
-                nombrePrincipal: true,
-                responsable: true,
-                codigoMateria: true,
-                actividad: true,
-              },
-            },
-          },
-          where: {
-            evento: {
-              fechaFin: {
-                gte: today,
-              },
-            },
-          },
-        },
-      },
-      orderBy: [
-        { piso: "desc" },
-        { nombre: "asc" },
-      ],
-    });
 
-    // Asignar piso automáticamente si es null (extrayendo del nombre)
-    const salonesConPiso = salones
+    const rows = await prisma.$queryRaw<RoomsInfoRawRow[]>`
+      SELECT
+        s.id::text AS salon_id,
+        s.nombre_bloque AS salon_nombre,
+        s.piso AS salon_piso,
+        s.capacidad AS salon_capacidad,
+        h.dia_semana::text AS dia_semana,
+        CASE WHEN h.hora_inicio IS NULL THEN NULL ELSE TO_CHAR(h.hora_inicio, 'HH24:MI') END AS hora_inicio,
+        CASE WHEN h.hora_fin IS NULL THEN NULL ELSE TO_CHAR(h.hora_fin, 'HH24:MI') END AS hora_fin,
+        e.nombre_principal,
+        e.responsable,
+        e.codigo_materia,
+        e.actividad
+      FROM public.salones s
+      LEFT JOIN public.horarios_evento h ON h.salon_id = s.id
+      LEFT JOIN public.eventos e ON e.id = h.evento_id AND e.fecha_fin >= ${today}::date
+      ORDER BY
+        s.piso DESC NULLS LAST,
+        s.nombre_bloque ASC,
+        h.dia_semana ASC NULLS LAST,
+        h.hora_inicio ASC NULLS LAST
+    `;
+
+    const salonesConPiso = rows
       .map((salon) => {
-        if (salon.piso !== null) {
-          return salon;
-        }
-        // Si piso es null, intenta extraer del nombre (ej: "Aula 101" → piso 1)
-        const match = salon.nombre.match(/(\d{3})/);
-        if (match && match[1]) {
-          const pisoFromName = parseInt(match[1].charAt(0));
-          return { ...salon, piso: pisoFromName };
-        }
-        return { ...salon, piso: 0 }; // 0 para filtrar después
-      })
-      .filter((salon) => salon.piso !== null && salon.piso > 0);
+        const inferredPiso = salon.salon_piso ?? (() => {
+          const match = salon.salon_nombre.match(/(\d{3})/);
+          if (match?.[1]) {
+            return Number.parseInt(match[1].charAt(0), 10);
+          }
+          return 0;
+        })();
 
-    // Agrupar por piso
+        return {
+          id: salon.salon_id,
+          nombre: salon.salon_nombre,
+          piso: inferredPiso,
+          capacidad: salon.salon_capacidad,
+          horarios: salon.dia_semana && salon.hora_inicio && salon.hora_fin
+            ? [
+                {
+                  diaSemana: salon.dia_semana,
+                  horaInicio: salon.hora_inicio,
+                  horaFin: salon.hora_fin,
+                  evento: {
+                    nombrePrincipal: salon.nombre_principal,
+                    responsable: salon.responsable,
+                    codigoMateria: salon.codigo_materia,
+                    actividad: salon.actividad,
+                  },
+                },
+              ]
+            : [],
+        };
+      })
+      .filter((salon) => salon.piso > 0);
+
     const pisos = new Map<number, typeof salonesConPiso>();
     salonesConPiso.forEach((salon) => {
-      const piso = salon.piso!;
+      const piso = salon.piso;
 
       if (!pisos.has(piso)) {
         pisos.set(piso, []);
@@ -518,7 +536,6 @@ schedulesRouter.get("/rooms-info", async (_req, res, next) => {
       pisos.get(piso)?.push(salon);
     });
 
-    // Convertir a array ordenado
     const roomsByFloor = Array.from(pisos.entries())
       .sort((a, b) => b[0] - a[0])
       .map(([, salones]) => salones);
