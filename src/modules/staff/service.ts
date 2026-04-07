@@ -94,6 +94,103 @@ type StaffResumenContratoRawRow = {
   balance_horas: number;
 };
 
+type SqlExecutor = Pick<typeof prisma, "$executeRaw">;
+
+const ensureStaffHorarioLaboralSchema = async (executor: SqlExecutor) => {
+  await executor.$executeRaw`
+    DO $$
+    BEGIN
+      IF NOT EXISTS (
+        SELECT 1
+        FROM pg_type t
+        JOIN pg_namespace n ON n.oid = t.typnamespace
+        WHERE t.typname = 'staff_tipo_pausa_enum'
+          AND n.nspname = 'public'
+      ) THEN
+        CREATE TYPE public.staff_tipo_pausa_enum AS ENUM ('Comida', 'Descanso');
+      END IF;
+    END $$;
+  `;
+
+  await executor.$executeRaw`
+    CREATE TABLE IF NOT EXISTS public.staff_jornada_semanal (
+      id uuid PRIMARY KEY DEFAULT gen_random_uuid(),
+      staff_id uuid NOT NULL REFERENCES public.staff(id) ON DELETE CASCADE,
+      dia_semana public.dia_semana_enum NOT NULL,
+      hora_entrada time NOT NULL,
+      hora_salida time NOT NULL,
+      total_horas_dia numeric(5,2) NOT NULL,
+      CONSTRAINT staff_jornada_rango_hora_chk CHECK (hora_salida > hora_entrada),
+      CONSTRAINT staff_jornada_horas_positivas_chk CHECK (total_horas_dia >= 0)
+    )
+  `;
+
+  await executor.$executeRaw`
+    ALTER TABLE public.staff_pausas_programadas
+    DROP CONSTRAINT IF EXISTS staff_pausas_jornada_fk
+  `;
+
+  await executor.$executeRaw`
+    ALTER TABLE public.staff_jornada_semanal
+    DROP CONSTRAINT IF EXISTS staff_jornada_staff_dia_uq
+  `;
+
+  await executor.$executeRaw`
+    CREATE TABLE IF NOT EXISTS public.staff_pausas_programadas (
+      id uuid PRIMARY KEY DEFAULT gen_random_uuid(),
+      staff_id uuid NOT NULL,
+      tipo_pausa public.staff_tipo_pausa_enum NOT NULL,
+      dia_semana public.dia_semana_enum NOT NULL,
+      hora_inicio time NOT NULL,
+      hora_fin time NOT NULL,
+      CONSTRAINT staff_pausas_rango_hora_chk CHECK (hora_fin > hora_inicio),
+      CONSTRAINT staff_pausas_jornada_fk
+        FOREIGN KEY (staff_id, dia_semana)
+        REFERENCES public.staff_jornada_semanal(staff_id, dia_semana)
+        ON DELETE CASCADE
+    )
+  `;
+
+  await executor.$executeRaw`
+    CREATE TABLE IF NOT EXISTS public.staff_resumen_contrato (
+      staff_id uuid PRIMARY KEY REFERENCES public.staff(id) ON DELETE CASCADE,
+      horas_semanales_contrato integer NOT NULL,
+      balance_horas numeric(8,2) NOT NULL DEFAULT 0,
+      CONSTRAINT staff_resumen_horas_semanales_chk CHECK (horas_semanales_contrato > 0)
+    )
+  `;
+
+  await executor.$executeRaw`
+    CREATE INDEX IF NOT EXISTS idx_staff_jornada_staff_id
+    ON public.staff_jornada_semanal(staff_id)
+  `;
+
+  await executor.$executeRaw`
+    CREATE INDEX IF NOT EXISTS idx_staff_jornada_dia
+    ON public.staff_jornada_semanal(dia_semana)
+  `;
+
+  await executor.$executeRaw`
+    CREATE UNIQUE INDEX IF NOT EXISTS idx_staff_jornada_staff_day_time_uq
+    ON public.staff_jornada_semanal(staff_id, dia_semana, hora_entrada, hora_salida)
+  `;
+
+  await executor.$executeRaw`
+    CREATE INDEX IF NOT EXISTS idx_staff_pausas_staff_id
+    ON public.staff_pausas_programadas(staff_id)
+  `;
+
+  await executor.$executeRaw`
+    CREATE INDEX IF NOT EXISTS idx_staff_pausas_dia
+    ON public.staff_pausas_programadas(dia_semana)
+  `;
+
+  await executor.$executeRaw`
+    CREATE INDEX IF NOT EXISTS idx_staff_pausas_tipo
+    ON public.staff_pausas_programadas(tipo_pausa)
+  `;
+};
+
 const toIsoDate = (value: Date) => value.toISOString().slice(0, 10);
 
 const mapStaffRows = (rows: StaffRawRow[]) => {
@@ -396,19 +493,23 @@ const toMinutes = (value: string) => {
 
 const validatePausaInsideJornada = (
   pausa: StaffPausaInput,
-  jornadaByDay: Map<string, StaffJornadaRawRow>,
+  jornadas: StaffJornadaRawRow[],
 ) => {
-  const jornada = jornadaByDay.get(pausa.diaSemana);
-  if (!jornada) {
+  const jornadaDelDia = jornadas.filter((item) => item.dia_semana === pausa.diaSemana);
+  if (jornadaDelDia.length === 0) {
     throw new Error(`No existe jornada para ${pausa.diaSemana}`);
   }
 
-  const jornadaStart = toMinutes(jornada.hora_entrada);
-  const jornadaEnd = toMinutes(jornada.hora_salida);
   const pausaStart = toMinutes(pausa.horaInicio);
   const pausaEnd = toMinutes(pausa.horaFin);
 
-  if (pausaStart < jornadaStart || pausaEnd > jornadaEnd) {
+  const fitsInSomeJornada = jornadaDelDia.some((jornada) => {
+    const jornadaStart = toMinutes(jornada.hora_entrada);
+    const jornadaEnd = toMinutes(jornada.hora_salida);
+    return pausaStart >= jornadaStart && pausaEnd <= jornadaEnd;
+  });
+
+  if (!fitsInSomeJornada) {
     throw new Error(`La pausa de ${pausa.diaSemana} debe estar dentro de la jornada laboral`);
   }
 };
@@ -427,6 +528,7 @@ const assertStaffExists = async (staffId: string) => {
 };
 
 export const listStaffJornadaSemanal = async (staffId: string) => {
+  await ensureStaffHorarioLaboralSchema(prisma);
   await assertStaffExists(staffId);
 
   const rows = await prisma.$queryRaw<StaffJornadaRawRow[]>`
@@ -439,7 +541,19 @@ export const listStaffJornadaSemanal = async (staffId: string) => {
       j.total_horas_dia::float8 AS total_horas_dia
     FROM public.staff_jornada_semanal j
     WHERE j.staff_id = ${staffId}::uuid
-    ORDER BY j.dia_semana::text ASC
+    ORDER BY
+      CASE j.dia_semana::text
+        WHEN 'Lunes' THEN 1
+        WHEN 'Martes' THEN 2
+        WHEN 'Miercoles' THEN 3
+        WHEN 'Jueves' THEN 4
+        WHEN 'Viernes' THEN 5
+        WHEN 'Sabado' THEN 6
+        WHEN 'Domingo' THEN 7
+        ELSE 99
+      END ASC,
+      j.hora_entrada ASC,
+      j.id ASC
   `;
 
   return rows.map((row) => ({
@@ -454,6 +568,8 @@ export const listStaffJornadaSemanal = async (staffId: string) => {
 
 export const replaceStaffJornadaSemanal = async (staffId: string, jornadas: StaffJornadaInput[]) => {
   return prisma.$transaction(async (tx) => {
+    await ensureStaffHorarioLaboralSchema(tx);
+
     const existing = await tx.$queryRaw<Array<{ id: string }>>`
       SELECT id::text AS id
       FROM public.staff
@@ -494,6 +610,7 @@ export const replaceStaffJornadaSemanal = async (staffId: string, jornadas: Staf
 };
 
 export const listStaffPausasProgramadas = async (staffId: string) => {
+  await ensureStaffHorarioLaboralSchema(prisma);
   await assertStaffExists(staffId);
 
   const rows = await prisma.$queryRaw<StaffPausaRawRow[]>`
@@ -521,6 +638,8 @@ export const listStaffPausasProgramadas = async (staffId: string) => {
 
 export const createStaffPausaProgramada = async (staffId: string, payload: StaffPausaInput) => {
   return prisma.$transaction(async (tx) => {
+    await ensureStaffHorarioLaboralSchema(tx);
+
     const existing = await tx.$queryRaw<Array<{ id: string }>>`
       SELECT id::text AS id
       FROM public.staff
@@ -544,8 +663,7 @@ export const createStaffPausaProgramada = async (staffId: string, payload: Staff
       WHERE staff_id = ${staffId}::uuid
     `;
 
-    const jornadaByDay = new Map(jornadas.map((item) => [item.dia_semana, item]));
-    validatePausaInsideJornada(payload, jornadaByDay);
+    validatePausaInsideJornada(payload, jornadas);
 
     const created = await tx.$queryRaw<Array<{ id: string }>>`
       INSERT INTO public.staff_pausas_programadas (
@@ -576,6 +694,8 @@ export const createStaffPausaProgramada = async (staffId: string, payload: Staff
 
 export const updateStaffPausaProgramada = async (staffId: string, pausaId: string, payload: StaffPausaInput) => {
   return prisma.$transaction(async (tx) => {
+    await ensureStaffHorarioLaboralSchema(tx);
+
     const existing = await tx.$queryRaw<Array<{ id: string }>>`
       SELECT id::text AS id
       FROM public.staff
@@ -599,8 +719,7 @@ export const updateStaffPausaProgramada = async (staffId: string, pausaId: strin
       WHERE staff_id = ${staffId}::uuid
     `;
 
-    const jornadaByDay = new Map(jornadas.map((item) => [item.dia_semana, item]));
-    validatePausaInsideJornada(payload, jornadaByDay);
+    validatePausaInsideJornada(payload, jornadas);
 
     const updated = await tx.$queryRaw<Array<{ id: string }>>`
       UPDATE public.staff_pausas_programadas
@@ -623,6 +742,8 @@ export const updateStaffPausaProgramada = async (staffId: string, pausaId: strin
 };
 
 export const deleteStaffPausaProgramada = async (staffId: string, pausaId: string) => {
+  await ensureStaffHorarioLaboralSchema(prisma);
+
   const deleted = await prisma.$queryRaw<Array<{ id: string }>>`
     DELETE FROM public.staff_pausas_programadas
     WHERE id = ${pausaId}::uuid
@@ -638,6 +759,7 @@ export const deleteStaffPausaProgramada = async (staffId: string, pausaId: strin
 };
 
 export const getStaffResumenContrato = async (staffId: string) => {
+  await ensureStaffHorarioLaboralSchema(prisma);
   await assertStaffExists(staffId);
 
   const rows = await prisma.$queryRaw<StaffResumenContratoRawRow[]>`
@@ -663,6 +785,8 @@ export const getStaffResumenContrato = async (staffId: string) => {
 };
 
 export const upsertStaffResumenContrato = async (staffId: string, payload: StaffResumenContratoInput) => {
+  await ensureStaffHorarioLaboralSchema(prisma);
+
   const updated = await prisma.$queryRaw<Array<{ staff_id: string }>>`
     INSERT INTO public.staff_resumen_contrato (
       staff_id,

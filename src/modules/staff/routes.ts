@@ -71,7 +71,7 @@ const jornadaSchema = z.object({
 });
 
 const replaceJornadaBodySchema = z.object({
-  jornadas: z.array(jornadaSchema).max(7),
+  jornadas: z.array(jornadaSchema).max(21),
 });
 
 const pausaBodySchema = z.object({
@@ -139,15 +139,7 @@ const validateBloqueosNoOverlap = (bloqueosClase: Array<{ diaSemana: string; hor
 };
 
 const validateJornadas = (jornadas: Array<{ diaSemana: string; horaEntrada: string; horaSalida: string; totalHorasDia: number }>) => {
-  const seenDays = new Set<string>();
-
-  for (const jornada of jornadas) {
-    if (seenDays.has(jornada.diaSemana)) {
-      throw new Error(`Dia repetido en jornada: ${jornada.diaSemana}`);
-    }
-
-    seenDays.add(jornada.diaSemana);
-
+  for (const [i, jornada] of jornadas.entries()) {
     if (toMinutes(jornada.horaSalida) <= toMinutes(jornada.horaEntrada)) {
       throw new Error(`La jornada de ${jornada.diaSemana} tiene hora fin menor o igual a hora inicio`);
     }
@@ -155,6 +147,29 @@ const validateJornadas = (jornadas: Array<{ diaSemana: string; horaEntrada: stri
     const bruto = (toMinutes(jornada.horaSalida) - toMinutes(jornada.horaEntrada)) / 60;
     if (jornada.totalHorasDia > bruto + 0.01) {
       throw new Error(`totalHorasDia excede el rango horario bruto en ${jornada.diaSemana}`);
+    }
+
+    for (let j = i + 1; j < jornadas.length; j += 1) {
+      const other = jornadas[j];
+      if (!other) continue;
+      if (jornada.diaSemana !== other.diaSemana) continue;
+
+      const startA = toMinutes(jornada.horaEntrada);
+      const endA = toMinutes(jornada.horaSalida);
+      const startB = toMinutes(other.horaEntrada);
+      const endB = toMinutes(other.horaSalida);
+
+      const isExactDuplicate = startA === startB && endA === endB;
+      if (isExactDuplicate) {
+        throw new Error(`Bloques duplicados en ${jornada.diaSemana}: ${jornada.horaEntrada}-${jornada.horaSalida}`);
+      }
+
+      const overlap = startA < endB && startB < endA;
+      if (overlap) {
+        throw new Error(
+          `Hay solape entre jornadas en ${jornada.diaSemana} (${jornada.horaEntrada}-${jornada.horaSalida} y ${other.horaEntrada}-${other.horaSalida})`,
+        );
+      }
     }
   }
 };
@@ -211,7 +226,7 @@ const handleKnownStaffScheduleError = (error: unknown, res: import("express").Re
     return true;
   }
 
-  if (message.includes("dia repetido") || message.includes("totalhorasdia") || message.includes("hora fin")) {
+  if (message.includes("solape") || message.includes("duplicados") || message.includes("totalhorasdia") || message.includes("hora fin")) {
     res.status(400).json({ error: error.message });
     return true;
   }
