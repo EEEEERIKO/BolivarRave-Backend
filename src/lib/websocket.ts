@@ -11,15 +11,18 @@ export interface ScheduleChangeEvent {
 
 let io: SocketIOServer | null = null;
 
-export const initializeWebSocket = (httpServer: HTTPServer): SocketIOServer => {
+type OriginChecker = (origin?: string) => boolean;
+
+export const initializeWebSocket = (httpServer: HTTPServer, isOriginAllowed: OriginChecker): SocketIOServer => {
   io = new SocketIOServer(httpServer, {
     cors: {
-      origin: [
-        "http://localhost:3000",
-        "http://localhost:3001",
-        "http://127.0.0.1:3000",
-        "http://127.0.0.1:3001",
-      ],
+      origin: (origin, callback) => {
+        if (!origin || isOriginAllowed(origin)) {
+          callback(null, true);
+          return;
+        }
+        callback(new Error("CORS origin no permitido"));
+      },
       methods: ["GET", "POST"],
       credentials: true,
     },

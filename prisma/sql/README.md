@@ -12,6 +12,7 @@ Run only:
 - [010_staff_role_id.sql](010_staff_role_id.sql)
 - [011_tareas_schema.sql](011_tareas_schema.sql)
 - [012_staff_horario_laboral_schema.sql](012_staff_horario_laboral_schema.sql)
+- [013_auditorio_requerimientos_extra.sql](013_auditorio_requerimientos_extra.sql)
 
 This single file creates:
 
@@ -62,6 +63,12 @@ And [012_staff_horario_laboral_schema.sql](012_staff_horario_laboral_schema.sql)
 - enum `staff_tipo_pausa_enum` (`Comida`, `Descanso`)
 - constraints and indexes for day/time consistency and staff relations
 
+And [013_auditorio_requerimientos_extra.sql](013_auditorio_requerimientos_extra.sql) adds:
+
+- `reservas_auditorio.requiere_monitor`
+- `reservas_auditorio.requiere_proyector`
+- `reservas_auditorio.requiere_filtro_agua`
+
 ## What each existing SQL file is for
 
 - [001_schedule_safety_constraints.sql](001_schedule_safety_constraints.sql): Legacy safety constraints for old Prisma schedule tables (`ClassSlot`). Not needed for current reservas schema.
@@ -78,6 +85,7 @@ And [012_staff_horario_laboral_schema.sql](012_staff_horario_laboral_schema.sql)
 1. Clean new server (recommended):
    - Execute [007_portable_full_migration.sql](007_portable_full_migration.sql)
    - Execute [008_auditorio_reservas_schema.sql](008_auditorio_reservas_schema.sql)
+   - Execute [013_auditorio_requerimientos_extra.sql](013_auditorio_requerimientos_extra.sql)
 
 2. Existing Supabase DB with data already loaded:
    - Keep historical files for audit only.

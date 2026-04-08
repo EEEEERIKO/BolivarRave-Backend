@@ -16,6 +16,9 @@ export type CreateReservaAuditorioInput = {
   numeroAsistentes: number;
   requierePantalla: boolean;
   requiereSonido: boolean;
+  requiereMonitor: boolean;
+  requiereProyector: boolean;
+  requiereFiltroAgua: boolean;
   observaciones: string | null;
   estado: AuditorioEstado;
   horarios: AuditorioHorarioInput[];
@@ -37,6 +40,9 @@ export const listReservasAuditorio = async () => {
     numero_asistentes: number;
     requiere_pantalla: boolean;
     requiere_sonido: boolean;
+    requiere_monitor: boolean;
+    requiere_proyector: boolean;
+    requiere_filtro_agua: boolean;
     observaciones: string | null;
     estado: AuditorioEstado;
     fecha_creacion: string;
@@ -54,6 +60,9 @@ export const listReservasAuditorio = async () => {
       r.numero_asistentes,
       r.requiere_pantalla,
       r.requiere_sonido,
+      r.requiere_monitor,
+      r.requiere_proyector,
+      r.requiere_filtro_agua,
       r.observaciones,
       r.estado,
       TO_CHAR(r.fecha_creacion, 'YYYY-MM-DD"T"HH24:MI:SS.MS"Z"') AS fecha_creacion,
@@ -84,6 +93,9 @@ export const listReservasAuditorio = async () => {
     numeroAsistentes: number;
     requierePantalla: boolean;
     requiereSonido: boolean;
+    requiereMonitor: boolean;
+    requiereProyector: boolean;
+    requiereFiltroAgua: boolean;
     observaciones: string | null;
     estado: AuditorioEstado;
     fechaCreacion: string;
@@ -108,6 +120,9 @@ export const listReservasAuditorio = async () => {
         numeroAsistentes: row.numero_asistentes,
         requierePantalla: row.requiere_pantalla,
         requiereSonido: row.requiere_sonido,
+        requiereMonitor: row.requiere_monitor,
+        requiereProyector: row.requiere_proyector,
+        requiereFiltroAgua: row.requiere_filtro_agua,
         observaciones: row.observaciones,
         estado: row.estado,
         fechaCreacion: row.fecha_creacion,
@@ -147,6 +162,9 @@ export const createReservaAuditorio = async (payload: CreateReservaAuditorioInpu
         numero_asistentes,
         requiere_pantalla,
         requiere_sonido,
+        requiere_monitor,
+        requiere_proyector,
+        requiere_filtro_agua,
         observaciones,
         estado
       )
@@ -158,6 +176,9 @@ export const createReservaAuditorio = async (payload: CreateReservaAuditorioInpu
         ${payload.numeroAsistentes},
         ${payload.requierePantalla},
         ${payload.requiereSonido},
+        ${payload.requiereMonitor},
+        ${payload.requiereProyector},
+        ${payload.requiereFiltroAgua},
         ${payload.observaciones},
         ${payload.estado}::public.auditorio_estado_enum
       )
@@ -202,6 +223,9 @@ export const updateReservaAuditorio = async (payload: UpdateReservaAuditorioInpu
         numero_asistentes = ${payload.numeroAsistentes},
         requiere_pantalla = ${payload.requierePantalla},
         requiere_sonido = ${payload.requiereSonido},
+        requiere_monitor = ${payload.requiereMonitor},
+        requiere_proyector = ${payload.requiereProyector},
+        requiere_filtro_agua = ${payload.requiereFiltroAgua},
         observaciones = ${payload.observaciones},
         estado = ${payload.estado}::public.auditorio_estado_enum
       WHERE id = ${payload.id}::uuid
