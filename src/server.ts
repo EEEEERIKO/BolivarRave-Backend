@@ -15,8 +15,9 @@ const PORT = Number(process.env.PORT ?? 4000);
 const NODE_ENV = process.env.NODE_ENV ?? "development";
 const isProduction = NODE_ENV === "production";
 const ADMIN_API_KEY = (process.env.ADMIN_API_KEY ?? "").trim();
+const corsOriginsRaw = process.env.CORS_ORIGINS ?? process.env.CORS_ORIGIN;
 const allowedOrigins = (
-  process.env.CORS_ORIGINS ??
+  corsOriginsRaw ??
   "http://localhost:3000,http://localhost:3001,http://127.0.0.1:3000,http://127.0.0.1:3001"
 )
   .split(",")
@@ -55,7 +56,7 @@ app.use(
     },
     credentials: true,
     methods: ["GET", "POST", "PUT", "PATCH", "DELETE", "OPTIONS"],
-    allowedHeaders: ["Content-Type", "Authorization"],
+    allowedHeaders: ["Content-Type", "Authorization", "x-admin-key"],
   })
 );
 

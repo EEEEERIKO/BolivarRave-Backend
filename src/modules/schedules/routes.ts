@@ -492,39 +492,76 @@ schedulesRouter.get("/rooms-info", async (_req, res, next) => {
         h.hora_inicio ASC NULLS LAST
     `;
 
-    const salonesConPiso = rows
-      .map((salon) => {
-        const inferredPiso = salon.salon_piso ?? (() => {
-          const match = salon.salon_nombre.match(/(\d{3})/);
-          if (match?.[1]) {
-            return Number.parseInt(match[1].charAt(0), 10);
-          }
-          return 0;
-        })();
+    const salonesMap = new Map<string, {
+      id: string;
+      nombre: string;
+      piso: number;
+      capacidad: number | null;
+      horarios: Array<{
+        diaSemana: string;
+        horaInicio: string;
+        horaFin: string;
+        evento: {
+          nombrePrincipal: string | null;
+          responsable: string | null;
+          codigoMateria: string | null;
+          actividad: string | null;
+        };
+      }>;
+    }>();
 
-        return {
+    for (const salon of rows) {
+      const inferredPiso = salon.salon_piso ?? (() => {
+        const match = salon.salon_nombre.match(/(\d{3})/);
+        if (match?.[1]) {
+          return Number.parseInt(match[1].charAt(0), 10);
+        }
+        return 0;
+      })();
+
+      if (inferredPiso <= 0) {
+        continue;
+      }
+
+      const existing = salonesMap.get(salon.salon_id);
+      if (!existing) {
+        salonesMap.set(salon.salon_id, {
           id: salon.salon_id,
           nombre: salon.salon_nombre,
           piso: inferredPiso,
           capacidad: salon.salon_capacidad,
-          horarios: salon.dia_semana && salon.hora_inicio && salon.hora_fin
-            ? [
-                {
-                  diaSemana: salon.dia_semana,
-                  horaInicio: salon.hora_inicio,
-                  horaFin: salon.hora_fin,
-                  evento: {
-                    nombrePrincipal: salon.nombre_principal,
-                    responsable: salon.responsable,
-                    codigoMateria: salon.codigo_materia,
-                    actividad: salon.actividad,
-                  },
-                },
-              ]
-            : [],
-        };
-      })
-      .filter((salon) => salon.piso > 0);
+          horarios: [],
+        });
+      }
+
+      if (salon.dia_semana && salon.hora_inicio && salon.hora_fin) {
+        const room = salonesMap.get(salon.salon_id);
+        if (room) {
+          const isDuplicateSlot = room.horarios.some(
+            (slot) =>
+              slot.diaSemana === salon.dia_semana &&
+              slot.horaInicio === salon.hora_inicio &&
+              slot.horaFin === salon.hora_fin
+          );
+
+          if (!isDuplicateSlot) {
+            room.horarios.push({
+              diaSemana: salon.dia_semana,
+              horaInicio: salon.hora_inicio,
+              horaFin: salon.hora_fin,
+              evento: {
+                nombrePrincipal: salon.nombre_principal,
+                responsable: salon.responsable,
+                codigoMateria: salon.codigo_materia,
+                actividad: salon.actividad,
+              },
+            });
+          }
+        }
+      }
+    }
+
+    const salonesConPiso = Array.from(salonesMap.values());
 
     const pisos = new Map<number, typeof salonesConPiso>();
     salonesConPiso.forEach((salon) => {
