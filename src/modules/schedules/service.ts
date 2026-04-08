@@ -103,6 +103,35 @@ const dayOrder: Record<string, number> = {
   Domingo: 7,
 };
 
+const normalizeDayKey = (value: string) =>
+  value
+    .toLowerCase()
+    .normalize("NFD")
+    .replace(/\p{Diacritic}/gu, "")
+    .replace(/\s+/g, " ")
+    .trim();
+
+const canonicalDayName = (value: string) => {
+  switch (normalizeDayKey(value)) {
+    case "lunes":
+      return "Lunes";
+    case "martes":
+      return "Martes";
+    case "miercoles":
+      return "Miercoles";
+    case "jueves":
+      return "Jueves";
+    case "viernes":
+      return "Viernes";
+    case "sabado":
+      return "Sabado";
+    case "domingo":
+      return "Domingo";
+    default:
+      return null;
+  }
+};
+
 const roomKey = (room: string) =>
   room
     .toLowerCase()
@@ -454,9 +483,12 @@ export const replaceAllSchedulesFromRows = async (
 
     for (const cls of classes) {
       cls.slots.forEach((slot) => {
-        if (!dayOrder[slot.day]) {
+        const canonicalDay = canonicalDayName(slot.day);
+        if (!canonicalDay) {
           throw new Error(`Dia invalido en importacion: '${slot.day}'`);
         }
+
+        slot.day = canonicalDay;
       });
 
       const validSlots = cls.slots
@@ -591,9 +623,12 @@ export const createScheduleEvent = async (payload: CreateScheduleEventInput) => 
     salones.forEach((salon) => roomIdByName.set(salon.nombre, salon.id));
 
     payload.slots.forEach((slot) => {
-      if (!dayOrder[slot.day]) {
+      const canonicalDay = canonicalDayName(slot.day);
+      if (!canonicalDay) {
         throw new Error(`Dia invalido en creacion: '${slot.day}'`);
       }
+
+      slot.day = canonicalDay;
     });
 
     const reservationTypeId = reservationTypeToId(payload.reservationType);
@@ -665,7 +700,8 @@ export const createScheduleEvent = async (payload: CreateScheduleEventInput) => 
 
 export const updateScheduleEventSlot = async (payload: UpdateScheduleEventSlotInput) => {
   return prisma.$transaction(async (tx) => {
-    if (!dayOrder[payload.day]) {
+    const canonicalDay = canonicalDayName(payload.day);
+    if (!canonicalDay) {
       throw new Error(`Dia invalido en modificacion: '${payload.day}'`);
     }
 
@@ -731,7 +767,7 @@ export const updateScheduleEventSlot = async (payload: UpdateScheduleEventSlotIn
       UPDATE public.horarios_evento
       SET
         salon_id = ${salonId}::uuid,
-        dia_semana = ${payload.day}::public.dia_semana_enum,
+        dia_semana = ${canonicalDay}::public.dia_semana_enum,
         hora_inicio = ${payload.startTime}::time,
         hora_fin = ${payload.endTime}::time
       WHERE id = ${payload.slotId}::uuid

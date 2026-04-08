@@ -566,6 +566,63 @@ export const listStaffJornadaSemanal = async (staffId: string) => {
   }));
 };
 
+export const listAllStaffJornadasSemanales = async () => {
+  await ensureStaffHorarioLaboralSchema(prisma);
+
+  const rows = await prisma.$queryRaw<StaffJornadaRawRow[]>`
+    SELECT
+      j.id::text AS id,
+      j.staff_id::text AS staff_id,
+      j.dia_semana::text AS dia_semana,
+      TO_CHAR(j.hora_entrada, 'HH24:MI') AS hora_entrada,
+      TO_CHAR(j.hora_salida, 'HH24:MI') AS hora_salida,
+      j.total_horas_dia::float8 AS total_horas_dia
+    FROM public.staff_jornada_semanal j
+    ORDER BY
+      CASE j.dia_semana::text
+        WHEN 'Lunes' THEN 1
+        WHEN 'Martes' THEN 2
+        WHEN 'Miercoles' THEN 3
+        WHEN 'Jueves' THEN 4
+        WHEN 'Viernes' THEN 5
+        WHEN 'Sabado' THEN 6
+        WHEN 'Domingo' THEN 7
+        ELSE 99
+      END ASC,
+      j.hora_entrada ASC,
+      j.id ASC
+  `;
+
+  const grouped: Record<string, Array<{
+    id: string;
+    staffId: string;
+    diaSemana: string;
+    horaEntrada: string;
+    horaSalida: string;
+    totalHorasDia: number;
+  }>> = {};
+
+  for (const row of rows) {
+    if (!grouped[row.staff_id]) {
+      grouped[row.staff_id] = [];
+    }
+
+    const target = grouped[row.staff_id];
+    if (!target) continue;
+
+    target.push({
+      id: row.id,
+      staffId: row.staff_id,
+      diaSemana: row.dia_semana,
+      horaEntrada: row.hora_entrada,
+      horaSalida: row.hora_salida,
+      totalHorasDia: row.total_horas_dia,
+    });
+  }
+
+  return grouped;
+};
+
 export const replaceStaffJornadaSemanal = async (staffId: string, jornadas: StaffJornadaInput[]) => {
   return prisma.$transaction(async (tx) => {
     await ensureStaffHorarioLaboralSchema(tx);

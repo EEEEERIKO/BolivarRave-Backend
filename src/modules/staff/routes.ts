@@ -9,6 +9,7 @@ import {
   getStaffHorarioLaboral,
   getStaffResumenContrato,
   getStaffById,
+  listAllStaffJornadasSemanales,
   listStaffJornadaSemanal,
   listStaffPausasProgramadas,
   listStaff,
@@ -238,6 +239,15 @@ staffRouter.get("/", async (_req, res, next) => {
   try {
     const staff = await listStaff();
     return res.json({ staff });
+  } catch (error) {
+    return next(error);
+  }
+});
+
+staffRouter.get("/jornadas-semanales", async (_req, res, next) => {
+  try {
+    const jornadasByStaffId = await listAllStaffJornadasSemanales();
+    return res.json({ jornadasByStaffId });
   } catch (error) {
     return next(error);
   }

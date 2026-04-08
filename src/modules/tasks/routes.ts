@@ -5,6 +5,7 @@ import {
   createHabilidad,
   createTaskCatalog,
   createTaskInstance,
+  deleteHabilidad,
   ensureTasksSchema,
   linkStaffHabilidad,
   listTaskCatalog,
@@ -15,6 +16,7 @@ import {
   unlinkStaffHabilidad,
   reviewTaskAssignment,
   sendTaskToReview,
+  updateHabilidad,
   type TareaEstado,
   type TareaPrioridad,
   type TareaTipo,
@@ -51,6 +53,10 @@ const createCatalogSchema = z.object({
 });
 
 const createHabilidadSchema = z.object({
+  nombre: z.string().trim().min(2).max(120),
+});
+
+const updateHabilidadSchema = z.object({
   nombre: z.string().trim().min(2).max(120),
 });
 
@@ -127,6 +133,43 @@ tasksRouter.post("/skills", requireAdminKey, async (req, res, next) => {
     return res.status(201).json({
       message: "Habilidad creada correctamente",
       id: created.id,
+    });
+  } catch (error) {
+    if (error instanceof z.ZodError) {
+      return res.status(400).json({ error: `Payload invalido: ${error.issues[0]?.message ?? "error de validacion"}` });
+    }
+
+    return next(error);
+  }
+});
+
+tasksRouter.put("/skills/:id", requireAdminKey, async (req, res, next) => {
+  try {
+    const { id } = idParamsSchema.parse(req.params);
+    const parsed = updateHabilidadSchema.parse(req.body);
+    const updated = await updateHabilidad({ id, nombre: parsed.nombre });
+
+    return res.json({
+      message: "Habilidad actualizada correctamente",
+      id: updated.id,
+    });
+  } catch (error) {
+    if (error instanceof z.ZodError) {
+      return res.status(400).json({ error: `Payload invalido: ${error.issues[0]?.message ?? "error de validacion"}` });
+    }
+
+    return next(error);
+  }
+});
+
+tasksRouter.delete("/skills/:id", requireAdminKey, async (req, res, next) => {
+  try {
+    const { id } = idParamsSchema.parse(req.params);
+    const deleted = await deleteHabilidad(id);
+
+    return res.json({
+      message: "Habilidad eliminada correctamente",
+      id: deleted.id,
     });
   } catch (error) {
     if (error instanceof z.ZodError) {

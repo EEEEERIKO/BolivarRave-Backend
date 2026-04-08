@@ -346,6 +346,42 @@ export const createHabilidad = async (payload: CreateHabilidadInput) => {
   return { id };
 };
 
+export type UpdateHabilidadInput = {
+  id: string;
+  nombre: string;
+};
+
+export const updateHabilidad = async (payload: UpdateHabilidadInput) => {
+  const updated = await prisma.$queryRaw<Array<{ id: string }>>`
+    UPDATE public.habilidades
+    SET nombre = ${payload.nombre}
+    WHERE id = ${payload.id}::uuid
+    RETURNING id::text AS id
+  `;
+
+  const id = updated[0]?.id;
+  if (!id) {
+    throw new Error("No se encontro la habilidad a modificar");
+  }
+
+  return { id };
+};
+
+export const deleteHabilidad = async (id: string) => {
+  const deleted = await prisma.$queryRaw<Array<{ id: string }>>`
+    DELETE FROM public.habilidades
+    WHERE id = ${id}::uuid
+    RETURNING id::text AS id
+  `;
+
+  const deletedId = deleted[0]?.id;
+  if (!deletedId) {
+    throw new Error("No se encontro la habilidad a eliminar");
+  }
+
+  return { id: deletedId };
+};
+
 export const listStaffHabilidades = async (staffId?: string) => {
   const rows = staffId
     ? await prisma.$queryRaw<StaffHabilidadRow[]>`
