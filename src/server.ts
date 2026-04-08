@@ -16,20 +16,30 @@ const NODE_ENV = process.env.NODE_ENV ?? "development";
 const isProduction = NODE_ENV === "production";
 const ADMIN_API_KEY = (process.env.ADMIN_API_KEY ?? "").trim();
 const corsOriginsRaw = process.env.CORS_ORIGINS ?? process.env.CORS_ORIGIN;
-const allowedOrigins = (
-  corsOriginsRaw ??
-  "http://localhost:3000,http://localhost:3001,http://127.0.0.1:3000,http://127.0.0.1:3001"
-)
+const normalizeOrigin = (origin: string) => origin.trim().replace(/\/+$/, "");
+const alwaysAllowedOrigins = [
+  "http://localhost:3000",
+  "http://localhost:3001",
+  "http://127.0.0.1:3000",
+  "http://127.0.0.1:3001",
+  "https://administracion-bolivar-rave.vercel.app",
+];
+const configuredOrigins = (corsOriginsRaw ?? "")
   .split(",")
-  .map((origin) => origin.trim())
+  .map((origin) => normalizeOrigin(origin))
   .filter(Boolean);
+const allowedOrigins = Array.from(new Set([...alwaysAllowedOrigins, ...configuredOrigins].map((origin) => normalizeOrigin(origin))));
+const isOriginAllowed = (origin?: string) => {
+  if (!origin) return true;
+  return allowedOrigins.includes(normalizeOrigin(origin));
+};
 
 if (isProduction && !ADMIN_API_KEY) {
   throw new Error("ADMIN_API_KEY es obligatoria en produccion");
 }
 
 // Initialize WebSocket
-const io = initializeWebSocket(httpServer);
+const io = initializeWebSocket(httpServer, isOriginAllowed);
 console.log("✅ WebSocket inicializado");
 
 app.disable("x-powered-by");
@@ -44,11 +54,7 @@ app.use(
 app.use(
   cors({
     origin: (origin, callback) => {
-      if (!origin) {
-        callback(null, true);
-        return;
-      }
-      if (allowedOrigins.includes(origin)) {
+      if (isOriginAllowed(origin)) {
         callback(null, true);
         return;
       }
