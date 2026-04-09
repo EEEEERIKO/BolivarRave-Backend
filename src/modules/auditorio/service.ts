@@ -30,8 +30,54 @@ export type UpdateReservaAuditorioInput = CreateReservaAuditorioInput & {
 
 const toIsoDate = (value: Date) => value.toISOString().slice(0, 10);
 
+type AuditorioRequerimientosColumns = {
+  requiereMonitor: string | null;
+  requiereProyector: string | null;
+  requiereFiltroAgua: string | null;
+};
+
+const quoteIdentifier = (identifier: string) => `"${identifier.replace(/"/g, '""')}"`;
+
+const pickExistingColumn = (available: Set<string>, candidates: string[]) => {
+  for (const candidate of candidates) {
+    if (available.has(candidate)) {
+      return candidate;
+    }
+  }
+
+  return null;
+};
+
+const getAuditorioRequerimientosColumns = async (): Promise<AuditorioRequerimientosColumns> => {
+  const columns = await prisma.$queryRaw<Array<{ column_name: string }>>`
+    SELECT column_name
+    FROM information_schema.columns
+    WHERE table_schema = 'public'
+      AND table_name = 'reservas_auditorio'
+  `;
+
+  const available = new Set(columns.map((row) => row.column_name));
+
+  return {
+    requiereMonitor: pickExistingColumn(available, ["requiere_monitor", "requiereMonitor"]),
+    requiereProyector: pickExistingColumn(available, ["requiere_proyector", "requiereProyector"]),
+    requiereFiltroAgua: pickExistingColumn(available, ["requiere_filtro_agua", "requiereFiltroAgua"]),
+  };
+};
+
 export const listReservasAuditorio = async () => {
-  const rows = await prisma.$queryRaw<Array<{
+  const requerimientosColumns = await getAuditorioRequerimientosColumns();
+  const monitorSelect = requerimientosColumns.requiereMonitor
+    ? `r.${quoteIdentifier(requerimientosColumns.requiereMonitor)} AS requiere_monitor,`
+    : "false AS requiere_monitor,";
+  const proyectorSelect = requerimientosColumns.requiereProyector
+    ? `r.${quoteIdentifier(requerimientosColumns.requiereProyector)} AS requiere_proyector,`
+    : "false AS requiere_proyector,";
+  const filtroAguaSelect = requerimientosColumns.requiereFiltroAgua
+    ? `r.${quoteIdentifier(requerimientosColumns.requiereFiltroAgua)} AS requiere_filtro_agua,`
+    : "false AS requiere_filtro_agua,";
+
+  const rows = await prisma.$queryRawUnsafe<Array<{
     id: string;
     nombre_evento: string;
     organizador: string;
@@ -50,7 +96,8 @@ export const listReservasAuditorio = async () => {
     fecha_especifica: string | null;
     hora_inicio: string | null;
     hora_fin: string | null;
-  }>>`
+  }>>(
+    `
     SELECT
       r.id::text AS id,
       r.nombre_evento,
@@ -60,9 +107,9 @@ export const listReservasAuditorio = async () => {
       r.numero_asistentes,
       r.requiere_pantalla,
       r.requiere_sonido,
-      r.requiere_monitor,
-      r.requiere_proyector,
-      r.requiere_filtro_agua,
+      ${monitorSelect}
+      ${proyectorSelect}
+      ${filtroAguaSelect}
       r.observaciones,
       r.estado,
       TO_CHAR(r.fecha_creacion, 'YYYY-MM-DD"T"HH24:MI:SS.MS"Z"') AS fecha_creacion,
@@ -82,7 +129,8 @@ export const listReservasAuditorio = async () => {
     FROM public.reservas_auditorio r
     LEFT JOIN public.horarios_intercalados_auditorio h ON h.reserva_id = r.id
     ORDER BY r.fecha_creacion DESC, h.fecha_especifica ASC NULLS LAST, h.hora_inicio ASC NULLS LAST
-  `;
+  `
+  );
 
   const byId = new Map<string, {
     id: string;
@@ -153,37 +201,69 @@ export const listReservasAuditorio = async () => {
 
 export const createReservaAuditorio = async (payload: CreateReservaAuditorioInput) => {
   return prisma.$transaction(async (tx) => {
-    const reserva = await tx.$queryRaw<Array<{ id: string }>>`
+    const requerimientosColumns = await getAuditorioRequerimientosColumns();
+    const columns = [
+      "nombre_evento",
+      "organizador",
+      "fecha_inicio_periodo",
+      "fecha_fin_periodo",
+      "numero_asistentes",
+      "requiere_pantalla",
+      "requiere_sonido",
+    ];
+    const values = [
+      "$1",
+      "$2",
+      "$3::date",
+      "$4::date",
+      "$5",
+      "$6",
+      "$7",
+    ];
+    const params: Array<string | number | boolean | null> = [
+      payload.nombreEvento,
+      payload.organizador,
+      toIsoDate(payload.fechaInicioPeriodo),
+      toIsoDate(payload.fechaFinPeriodo),
+      payload.numeroAsistentes,
+      payload.requierePantalla,
+      payload.requiereSonido,
+    ];
+
+    if (requerimientosColumns.requiereMonitor) {
+      columns.push(quoteIdentifier(requerimientosColumns.requiereMonitor));
+      values.push(`$${params.length + 1}`);
+      params.push(payload.requiereMonitor);
+    }
+
+    if (requerimientosColumns.requiereProyector) {
+      columns.push(quoteIdentifier(requerimientosColumns.requiereProyector));
+      values.push(`$${params.length + 1}`);
+      params.push(payload.requiereProyector);
+    }
+
+    if (requerimientosColumns.requiereFiltroAgua) {
+      columns.push(quoteIdentifier(requerimientosColumns.requiereFiltroAgua));
+      values.push(`$${params.length + 1}`);
+      params.push(payload.requiereFiltroAgua);
+    }
+
+    columns.push("observaciones", "estado");
+    values.push(`$${params.length + 1}`, `$${params.length + 2}::public.auditorio_estado_enum`);
+    params.push(payload.observaciones, payload.estado);
+
+    const reserva = await tx.$queryRawUnsafe<Array<{ id: string }>>(
+      `
       INSERT INTO public.reservas_auditorio (
-        nombre_evento,
-        organizador,
-        fecha_inicio_periodo,
-        fecha_fin_periodo,
-        numero_asistentes,
-        requiere_pantalla,
-        requiere_sonido,
-        requiere_monitor,
-        requiere_proyector,
-        requiere_filtro_agua,
-        observaciones,
-        estado
+        ${columns.join(",\n        ")}
       )
       VALUES (
-        ${payload.nombreEvento},
-        ${payload.organizador},
-        ${toIsoDate(payload.fechaInicioPeriodo)}::date,
-        ${toIsoDate(payload.fechaFinPeriodo)}::date,
-        ${payload.numeroAsistentes},
-        ${payload.requierePantalla},
-        ${payload.requiereSonido},
-        ${payload.requiereMonitor},
-        ${payload.requiereProyector},
-        ${payload.requiereFiltroAgua},
-        ${payload.observaciones},
-        ${payload.estado}::public.auditorio_estado_enum
+        ${values.join(",\n        ")}
       )
       RETURNING id::text AS id
-    `;
+    `,
+      ...params
+    );
 
     const reservaId = reserva[0]?.id;
     if (!reservaId) {
@@ -213,24 +293,60 @@ export const createReservaAuditorio = async (payload: CreateReservaAuditorioInpu
 
 export const updateReservaAuditorio = async (payload: UpdateReservaAuditorioInput) => {
   return prisma.$transaction(async (tx) => {
-    const updated = await tx.$queryRaw<Array<{ id: string }>>`
+    const requerimientosColumns = await getAuditorioRequerimientosColumns();
+    const assignments = [
+      "nombre_evento = $1",
+      "organizador = $2",
+      "fecha_inicio_periodo = $3::date",
+      "fecha_fin_periodo = $4::date",
+      "numero_asistentes = $5",
+      "requiere_pantalla = $6",
+      "requiere_sonido = $7",
+    ];
+    const params: Array<string | number | boolean | null> = [
+      payload.nombreEvento,
+      payload.organizador,
+      toIsoDate(payload.fechaInicioPeriodo),
+      toIsoDate(payload.fechaFinPeriodo),
+      payload.numeroAsistentes,
+      payload.requierePantalla,
+      payload.requiereSonido,
+    ];
+
+    if (requerimientosColumns.requiereMonitor) {
+      assignments.push(`${quoteIdentifier(requerimientosColumns.requiereMonitor)} = $${params.length + 1}`);
+      params.push(payload.requiereMonitor);
+    }
+
+    if (requerimientosColumns.requiereProyector) {
+      assignments.push(`${quoteIdentifier(requerimientosColumns.requiereProyector)} = $${params.length + 1}`);
+      params.push(payload.requiereProyector);
+    }
+
+    if (requerimientosColumns.requiereFiltroAgua) {
+      assignments.push(`${quoteIdentifier(requerimientosColumns.requiereFiltroAgua)} = $${params.length + 1}`);
+      params.push(payload.requiereFiltroAgua);
+    }
+
+    assignments.push(
+      `observaciones = $${params.length + 1}`,
+      `estado = $${params.length + 2}::public.auditorio_estado_enum`
+    );
+    params.push(payload.observaciones, payload.estado);
+
+    const whereIdParam = `$${params.length + 1}`;
+    params.push(payload.id);
+
+    const updated = await tx.$queryRawUnsafe<Array<{ id: string }>>(
+      `
       UPDATE public.reservas_auditorio
       SET
-        nombre_evento = ${payload.nombreEvento},
-        organizador = ${payload.organizador},
-        fecha_inicio_periodo = ${toIsoDate(payload.fechaInicioPeriodo)}::date,
-        fecha_fin_periodo = ${toIsoDate(payload.fechaFinPeriodo)}::date,
-        numero_asistentes = ${payload.numeroAsistentes},
-        requiere_pantalla = ${payload.requierePantalla},
-        requiere_sonido = ${payload.requiereSonido},
-        requiere_monitor = ${payload.requiereMonitor},
-        requiere_proyector = ${payload.requiereProyector},
-        requiere_filtro_agua = ${payload.requiereFiltroAgua},
-        observaciones = ${payload.observaciones},
-        estado = ${payload.estado}::public.auditorio_estado_enum
-      WHERE id = ${payload.id}::uuid
+        ${assignments.join(",\n        ")}
+      WHERE id = ${whereIdParam}::uuid
       RETURNING id::text AS id
-    `;
+    `,
+      ...params
+    );
 
     if (!updated[0]?.id) {
       throw new Error("No se encontro la reserva de auditorio a modificar");

@@ -40,6 +40,8 @@ type UpdateScheduleEventSlotInput = {
   room: string;
   startTime: string;
   endTime: string;
+  targetDate?: Date;
+  updateScope?: "always" | "week";
 };
 
 type SearchAvailableRoomsInput = {
@@ -64,6 +66,24 @@ const ensureImportsHistoryTable = async () => {
       conflicts_rejected integer NOT NULL DEFAULT 0,
       imported_by text,
       status text NOT NULL DEFAULT 'success'
+    )
+  `);
+};
+
+const ensureSlotExceptionsTable = async () => {
+  await prisma.$executeRawUnsafe(`
+    CREATE TABLE IF NOT EXISTS public.horarios_evento_excepciones (
+      id uuid PRIMARY KEY DEFAULT gen_random_uuid(),
+      horario_id uuid NOT NULL REFERENCES public.horarios_evento(id) ON DELETE CASCADE,
+      fecha date NOT NULL,
+      dia_semana public.dia_semana_enum NOT NULL,
+      salon_id uuid NOT NULL REFERENCES public.salones(id),
+      hora_inicio time NOT NULL,
+      hora_fin time NOT NULL,
+      created_at timestamptz NOT NULL DEFAULT now(),
+      updated_at timestamptz NOT NULL DEFAULT now(),
+      CONSTRAINT horarios_evento_excepciones_hora_chk CHECK (hora_fin > hora_inicio),
+      CONSTRAINT horarios_evento_excepciones_unique UNIQUE (horario_id, fecha)
     )
   `);
 };
@@ -326,7 +346,12 @@ const RESERVA_SEMESTRE_ID = 1;
 const RESERVA_MOMENTANEA_ID = 2;
 const RESERVA_IGLESIA_ID = 3;
 
-const toIsoDate = (value: Date) => value.toISOString().slice(0, 10);
+const toIsoDate = (value: Date) => {
+  const year = value.getFullYear();
+  const month = String(value.getMonth() + 1).padStart(2, "0");
+  const day = String(value.getDate()).padStart(2, "0");
+  return `${year}-${month}-${day}`;
+};
 
 const reservationTypeToId = (type: ReservationTypeKey) => {
   if (type === "momentanea") return RESERVA_MOMENTANEA_ID;
@@ -631,6 +656,26 @@ export const createScheduleEvent = async (payload: CreateScheduleEventInput) => 
       slot.day = canonicalDay;
     });
 
+    const seenSlots = new Set<string>();
+    for (const slot of payload.slots) {
+      const slotKey = [slot.day, canonicalRoomName(slot.room) ?? slot.room, slot.startTime, slot.endTime].join("|");
+      if (seenSlots.has(slotKey)) {
+        throw new Error(
+          `HORARIO_DUPLICADO_EN_FORMULARIO|${slot.room}|${slot.day}|${slot.startTime}-${slot.endTime}|${payload.subject}`
+        );
+      }
+      seenSlots.add(slotKey);
+    }
+
+    const normalizedStartDateIso = toIsoDate(payload.startDate);
+    const normalizedEndDateIso = toIsoDate(payload.endDate);
+
+    if (normalizedStartDateIso > normalizedEndDateIso) {
+      throw new Error(
+        `FECHAS_INVALIDAS|${normalizedStartDateIso}|${normalizedEndDateIso}|${payload.subject}`
+      );
+    }
+
     const reservationTypeId = reservationTypeToId(payload.reservationType);
     const isIglesiaReservation = reservationTypeId === RESERVA_IGLESIA_ID;
 
@@ -639,6 +684,46 @@ export const createScheduleEvent = async (payload: CreateScheduleEventInput) => 
       : await resolveFacultadId(tx, facultyIdByName, payload.faculty);
     const materialCode = isIglesiaReservation ? null : payload.code;
     const activity = isIglesiaReservation ? payload.subject : null;
+
+    for (const slot of payload.slots) {
+      const resolvedRoomName = canonicalRoomName(slot.room);
+      if (!resolvedRoomName) {
+        throw new Error(`El salon '${slot.room}' no pertenece al catalogo oficial`);
+      }
+
+      const conflict = await tx.$queryRaw<
+        Array<{
+          subject: string;
+          room: string;
+          start_time: string;
+          end_time: string;
+          existing_start_date: string;
+          existing_end_date: string;
+        }>
+      >`
+        SELECT
+          e.nombre_principal AS subject,
+          s.nombre_bloque AS room,
+          TO_CHAR(h.hora_inicio, 'HH24:MI:SS') AS start_time,
+          TO_CHAR(h.hora_fin, 'HH24:MI:SS') AS end_time,
+          TO_CHAR(e.fecha_inicio, 'YYYY-MM-DD') AS existing_start_date,
+          TO_CHAR(e.fecha_fin, 'YYYY-MM-DD') AS existing_end_date
+        FROM public.horarios_evento h
+        INNER JOIN public.eventos e ON e.id = h.evento_id
+        INNER JOIN public.salones s ON s.id = h.salon_id
+        WHERE h.salon_id = ${await resolveSalonId(tx, roomIdByName, resolvedRoomName)}::uuid
+          AND h.dia_semana = ${slot.day}::public.dia_semana_enum
+          AND (${normalizedStartDateIso}::date <= e.fecha_fin AND ${normalizedEndDateIso}::date >= e.fecha_inicio)
+          AND (${slot.startTime}::time < h.hora_fin AND h.hora_inicio < ${slot.endTime}::time)
+        LIMIT 1
+      `;
+
+      if (conflict[0]) {
+        throw new Error(
+          `CONFLICTO_SOLAPE|${conflict[0].room}|${slot.day}|${conflict[0].start_time}-${conflict[0].end_time}|${slot.startTime}-${slot.endTime}|${conflict[0].subject}|${conflict[0].existing_start_date} a ${conflict[0].existing_end_date}`
+        );
+      }
+    }
 
     const evento = await tx.$queryRaw<Array<{ id: string }>>`
       INSERT INTO public.eventos (
@@ -705,14 +790,9 @@ export const updateScheduleEventSlot = async (payload: UpdateScheduleEventSlotIn
       throw new Error(`Dia invalido en modificacion: '${payload.day}'`);
     }
 
-    const facultyIdByName = new Map<string, string>();
-    const roomIdByName = new Map<string, string>();
+    const updateScope = payload.updateScope ?? "always";
 
-    const facultades = await tx.$queryRaw<Array<{ id: string; nombre: string }>>`
-      SELECT id::text AS id, nombre
-      FROM public.facultades
-    `;
-    facultades.forEach((facultad) => facultyIdByName.set(facultad.nombre, facultad.id));
+    const roomIdByName = new Map<string, string>();
 
     const salones = await tx.$queryRaw<Array<{ id: string; nombre: string }>>`
       SELECT id::text AS id, nombre_bloque AS nombre
@@ -720,17 +800,131 @@ export const updateScheduleEventSlot = async (payload: UpdateScheduleEventSlotIn
     `;
     salones.forEach((salon) => roomIdByName.set(salon.nombre, salon.id));
 
-    const currentEvent = await tx.$queryRaw<Array<{ tipo_reserva_id: number }>>`
-      SELECT tipo_reserva_id
+    const currentEvent = await tx.$queryRaw<Array<{ tipo_reserva_id: number; fecha_inicio: string; fecha_fin: string }>>`
+      SELECT tipo_reserva_id, TO_CHAR(fecha_inicio, 'YYYY-MM-DD') AS fecha_inicio, TO_CHAR(fecha_fin, 'YYYY-MM-DD') AS fecha_fin
       FROM public.eventos
       WHERE id = ${payload.eventId}::uuid
       LIMIT 1
     `;
 
-    const currentReservationTypeId = currentEvent[0]?.tipo_reserva_id;
+    const currentEventRow = currentEvent[0];
+    const currentReservationTypeId = currentEventRow?.tipo_reserva_id;
     if (!currentReservationTypeId) {
       throw new Error("No se encontro el evento a modificar");
     }
+
+    const resolvedRoomName = canonicalRoomName(payload.room);
+    if (!resolvedRoomName) {
+      throw new Error(`El salon '${payload.room}' no pertenece al catalogo oficial`);
+    }
+    const salonId = await resolveSalonId(tx, roomIdByName, resolvedRoomName);
+
+    if (updateScope === "week") {
+      await ensureSlotExceptionsTable();
+
+      const slotOwnership = await tx.$queryRaw<Array<{ id: string }>>`
+        SELECT id::text AS id
+        FROM public.horarios_evento
+        WHERE id = ${payload.slotId}::uuid
+          AND evento_id = ${payload.eventId}::uuid
+        LIMIT 1
+      `;
+
+      if (!slotOwnership[0]?.id) {
+        throw new Error("No se encontro el horario a modificar");
+      }
+
+      if (!payload.targetDate) {
+        throw new Error("Debes enviar targetDate para modificar solo esta semana");
+      }
+
+      const targetDateIso = toIsoDate(payload.targetDate);
+      const eventStart = currentEventRow.fecha_inicio;
+      const eventEnd = currentEventRow.fecha_fin;
+
+      if (targetDateIso < eventStart || targetDateIso > eventEnd) {
+        throw new Error("La fecha seleccionada no pertenece al rango activo de la clase");
+      }
+
+      const conflict = await tx.$queryRaw<
+        Array<{
+          subject: string;
+          room: string;
+          start_time: string;
+          end_time: string;
+        }>
+      >`
+        SELECT
+          e.nombre_principal AS subject,
+          COALESCE(sx.nombre_bloque, sb.nombre_bloque) AS room,
+          TO_CHAR(COALESCE(x.hora_inicio, h.hora_inicio), 'HH24:MI:SS') AS start_time,
+          TO_CHAR(COALESCE(x.hora_fin, h.hora_fin), 'HH24:MI:SS') AS end_time
+        FROM public.horarios_evento h
+        INNER JOIN public.eventos e ON e.id = h.evento_id
+        INNER JOIN public.salones sb ON sb.id = h.salon_id
+        LEFT JOIN public.horarios_evento_excepciones x
+          ON x.horario_id = h.id
+         AND x.fecha = ${targetDateIso}::date
+        LEFT JOIN public.salones sx ON sx.id = x.salon_id
+        WHERE ${targetDateIso}::date BETWEEN e.fecha_inicio AND e.fecha_fin
+          AND COALESCE(x.dia_semana, h.dia_semana) = ${canonicalDay}::public.dia_semana_enum
+          AND COALESCE(x.salon_id, h.salon_id) = ${salonId}::uuid
+          AND (${payload.startTime}::time < COALESCE(x.hora_fin, h.hora_fin)
+            AND COALESCE(x.hora_inicio, h.hora_inicio) < ${payload.endTime}::time)
+          AND NOT (h.id = ${payload.slotId}::uuid AND h.evento_id = ${payload.eventId}::uuid)
+        LIMIT 1
+      `;
+
+      if (conflict[0]) {
+        const dayLabel =
+          canonicalDay === "Miercoles"
+            ? "Miércoles"
+            : canonicalDay === "Sabado"
+              ? "Sábado"
+              : canonicalDay;
+
+        throw new Error(
+          `CONFLICTO_SOLAPE|${conflict[0].room}|${dayLabel}|${conflict[0].start_time}-${conflict[0].end_time}|${payload.startTime}:00-${payload.endTime}:00|${conflict[0].subject}`
+        );
+      }
+
+      await tx.$executeRaw`
+        INSERT INTO public.horarios_evento_excepciones (
+          horario_id,
+          fecha,
+          dia_semana,
+          salon_id,
+          hora_inicio,
+          hora_fin,
+          updated_at
+        )
+        VALUES (
+          ${payload.slotId}::uuid,
+          ${targetDateIso}::date,
+          ${canonicalDay}::public.dia_semana_enum,
+          ${salonId}::uuid,
+          ${payload.startTime}::time,
+          ${payload.endTime}::time,
+          NOW()
+        )
+        ON CONFLICT (horario_id, fecha)
+        DO UPDATE SET
+          dia_semana = EXCLUDED.dia_semana,
+          salon_id = EXCLUDED.salon_id,
+          hora_inicio = EXCLUDED.hora_inicio,
+          hora_fin = EXCLUDED.hora_fin,
+          updated_at = NOW()
+      `;
+
+      return;
+    }
+
+    const facultyIdByName = new Map<string, string>();
+    const facultades = await tx.$queryRaw<Array<{ id: string; nombre: string }>>`
+      SELECT id::text AS id, nombre
+      FROM public.facultades
+    `;
+    facultades.forEach((facultad) => facultyIdByName.set(facultad.nombre, facultad.id));
 
     const isIglesiaReservation = currentReservationTypeId === RESERVA_IGLESIA_ID;
     const facultadId = isIglesiaReservation
@@ -739,11 +933,26 @@ export const updateScheduleEventSlot = async (payload: UpdateScheduleEventSlotIn
     const materialCode = isIglesiaReservation ? null : payload.code;
     const activity = isIglesiaReservation ? payload.subject : null;
 
-    const resolvedRoomName = canonicalRoomName(payload.room);
-    if (!resolvedRoomName) {
-      throw new Error(`El salon '${payload.room}' no pertenece al catalogo oficial`);
-    }
-    const salonId = await resolveSalonId(tx, roomIdByName, resolvedRoomName);
+    // Validate overlap with the specific target date if provided
+    await tx.$executeRawUnsafe(`
+      SELECT public.verificar_solape_horario(
+        $1::uuid,
+        $2::uuid,
+        $3::public.dia_semana_enum,
+        $4::time,
+        $5::time,
+        $6::uuid,
+        $7::date
+      )
+    `, [
+      payload.eventId,
+      salonId,
+      canonicalDay,
+      payload.startTime,
+      payload.endTime,
+      payload.slotId,
+      payload.targetDate ? toIsoDate(payload.targetDate) : null
+    ]);
 
     const updatedEvent = await tx.$queryRaw<Array<{ id: string }>>`
       UPDATE public.eventos
@@ -883,6 +1092,8 @@ export const clearAllSchedules = async (requestedBy = "schedules-ui") => {
 };
 
 export const getScheduleEvents = async () => {
+  await ensureSlotExceptionsTable();
+
   const events = await prisma.$queryRaw<
     Array<{
       evento_id: string;
@@ -921,6 +1132,41 @@ export const getScheduleEvents = async () => {
     ORDER BY e.nombre_principal ASC
   `;
 
+  const overrides = await prisma.$queryRaw<
+    Array<{
+      horario_id: string;
+      date: string;
+      day: string;
+      room: string;
+      start: string;
+      end: string;
+    }>
+  >`
+    SELECT
+      x.horario_id::text AS horario_id,
+      TO_CHAR(x.fecha, 'YYYY-MM-DD') AS date,
+      x.dia_semana::text AS day,
+      s.nombre_bloque AS room,
+      TO_CHAR(x.hora_inicio, 'HH24:MI') AS start,
+      TO_CHAR(x.hora_fin, 'HH24:MI') AS "end"
+    FROM public.horarios_evento_excepciones x
+    INNER JOIN public.salones s ON s.id = x.salon_id
+  `;
+
+  const overridesBySlot = new Map<string, Array<{ date: string; day: string; room: string; start: string; end: string }>>();
+
+  overrides.forEach((item) => {
+    const bucket = overridesBySlot.get(item.horario_id) ?? [];
+    bucket.push({
+      date: item.date,
+      day: item.day,
+      room: canonicalRoomName(item.room) ?? item.room,
+      start: item.start,
+      end: item.end,
+    });
+    overridesBySlot.set(item.horario_id, bucket);
+  });
+
   return events.map((item) => ({
     id: `${item.evento_id}:${item.horario_id}`,
     classId: item.evento_id,
@@ -934,6 +1180,7 @@ export const getScheduleEvents = async () => {
     teacher: item.teacher,
     startDate: item.start_date,
     endDate: item.end_date,
+    overrides: overridesBySlot.get(item.horario_id) ?? [],
     reservationType: item.tipo_reserva_id === 3 ? "iglesia" : item.tipo_reserva_id === 2 ? "momentanea" : "normal",
     color: item.tipo_reserva_id === 3 ? "red" : item.tipo_reserva_id === 2 ? "amber" : "blue",
   }));
