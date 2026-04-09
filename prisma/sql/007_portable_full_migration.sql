@@ -159,7 +159,8 @@ create or replace function public.verificar_solape_horario(
   p_dia public.dia_semana_enum,
   p_hora_inicio time,
   p_hora_fin time,
-  p_horario_id uuid default null
+  p_horario_id uuid default null,
+  p_target_date date default null
 )
 returns void
 language plpgsql
@@ -167,7 +168,11 @@ as $$
 declare
   v_nuevo_inicio date;
   v_nuevo_fin date;
+  v_target_date date;
   v_conflicto record;
+  v_nombre_salon text;
+  v_nombre_dia text;
+  v_hora_conflicto text;
 begin
   select e.fecha_inicio, e.fecha_fin
     into v_nuevo_inicio, v_nuevo_fin
@@ -178,21 +183,60 @@ begin
     raise exception 'Evento no encontrado para validar solape: %', p_evento_id;
   end if;
 
-  select h.id as horario_id, h.evento_id, e.nombre_principal
+  v_target_date := p_target_date;
+  if v_target_date is null and v_nuevo_inicio = v_nuevo_fin then
+    v_target_date := v_nuevo_inicio;
+  end if;
+
+  select 
+    h.id, 
+    h.evento_id, 
+    e.nombre_principal,
+    coalesce(x.hora_inicio, h.hora_inicio) as hora_inicio,
+    coalesce(x.hora_fin, h.hora_fin) as hora_fin,
+    coalesce(sx.nombre_bloque, sb.nombre_bloque) as nombre_bloque,
+    coalesce(x.dia_semana, h.dia_semana) as dia_semana
     into v_conflicto
   from public.horarios_evento h
   join public.eventos e on e.id = h.evento_id
-  where h.salon_id = p_salon_id
-    and h.dia_semana = p_dia
-    and (p_hora_inicio < h.hora_fin and h.hora_inicio < p_hora_fin)
-    and daterange(v_nuevo_inicio, v_nuevo_fin, '[]') && daterange(e.fecha_inicio, e.fecha_fin, '[]')
+  join public.salones sb on sb.id = h.salon_id
+  left join public.horarios_evento_excepciones x
+    on x.horario_id = h.id
+   and x.fecha = v_target_date
+  left join public.salones sx on sx.id = x.salon_id
+  where coalesce(x.salon_id, h.salon_id) = p_salon_id
+    and coalesce(x.dia_semana, h.dia_semana) = p_dia
+    and (p_hora_inicio < coalesce(x.hora_fin, h.hora_fin) and coalesce(x.hora_inicio, h.hora_inicio) < p_hora_fin)
+    and (v_target_date is null or 
+         (v_target_date >= v_nuevo_inicio and v_target_date <= v_nuevo_fin and
+          v_target_date >= e.fecha_inicio and v_target_date <= e.fecha_fin))
+    and (v_target_date is not null or
+         daterange(v_nuevo_inicio, v_nuevo_fin, '[]') && daterange(e.fecha_inicio, e.fecha_fin, '[]'))
     and (p_horario_id is null or h.id <> p_horario_id)
+    and h.evento_id <> p_evento_id
   limit 1;
 
   if v_conflicto is not null then
-    raise exception
-      'Conflicto de solape: salon %, dia %, horario %-% con evento %',
-      p_salon_id, p_dia, p_hora_inicio, p_hora_fin, v_conflicto.nombre_principal;
+    v_nombre_salon := COALESCE(v_conflicto.nombre_bloque, 'Salón desconocido');
+    v_nombre_dia := CASE p_dia
+      WHEN 'Lunes'::public.dia_semana_enum THEN 'Lunes'
+      WHEN 'Martes'::public.dia_semana_enum THEN 'Martes'
+      WHEN 'Miercoles'::public.dia_semana_enum THEN 'Miércoles'
+      WHEN 'Jueves'::public.dia_semana_enum THEN 'Jueves'
+      WHEN 'Viernes'::public.dia_semana_enum THEN 'Viernes'
+      WHEN 'Sabado'::public.dia_semana_enum THEN 'Sábado'
+      WHEN 'Domingo'::public.dia_semana_enum THEN 'Domingo'
+      ELSE 'Día desconocido'
+    END;
+    v_hora_conflicto := (v_conflicto.hora_inicio)::text || '-' || (v_conflicto.hora_fin)::text;
+    
+    raise exception 
+      'CONFLICTO_SOLAPE|%|%|%|%|%',
+      v_nombre_salon,
+      v_nombre_dia,
+      v_hora_conflicto,
+      p_hora_inicio::text || '-' || p_hora_fin::text,
+      v_conflicto.nombre_principal;
   end if;
 end;
 $$;

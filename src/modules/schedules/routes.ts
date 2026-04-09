@@ -109,6 +109,8 @@ const updateEventSchema = z.object({
   room: z.string().min(1),
   start: z.string().regex(/^\d{2}:\d{2}$/),
   end: z.string().regex(/^\d{2}:\d{2}$/),
+  targetDate: z.string().regex(/^\d{4}-\d{2}-\d{2}$/).optional(),
+  updateScope: z.enum(["always", "week"]).optional(),
 });
 
 const availableRoomsQuerySchema = z.object({
@@ -155,30 +157,91 @@ const handleKnownScheduleWriteError = (error: unknown, res: import("express").Re
     return false;
   }
 
-  const message = error.message.toLowerCase();
+  const message = error.message;
+  const messageLower = message.toLowerCase();
 
-  if (message.includes("classslot_no_overlap") || message.includes("overlap") || message.includes("solap")) {
+  // Parse detailed conflict error: CONFLICTO_SOLAPE|salon|dia|hora_conflicto|hora_intento|clase
+  if (message.includes("CONFLICTO_SOLAPE")) {
+    const parts = message.split("|");
+    if (parts.length >= 6) {
+      const salon = parts[1];
+      const dia = parts[2];
+      const horaConflicto = parts[3]; // hora de la clase que ya existe
+      const horaIntento = parts[4]; // hora que intentaste poner
+      const clase = parts[5];
+      const rangoExistente = parts[6];
+
+      res.status(409).json({
+        error: `Solapamiento detectado en ${salon} el ${dia}. La clase "${clase}" ocupa ${horaConflicto}, pero intentaste usar ${horaIntento}${rangoExistente ? ` (rango: ${rangoExistente})` : ""}.`,
+        details: {
+          salon,
+          dia,
+          horaConflictiva: horaConflicto,
+          horaIntentada: horaIntento,
+          claseConflictiva: clase,
+          rangoExistente: rangoExistente ?? null,
+        },
+      });
+      return true;
+    }
+  }
+
+  if (message.includes("HORARIO_DUPLICADO_EN_FORMULARIO")) {
+    const parts = message.split("|");
+    if (parts.length >= 5) {
+      const salon = parts[1];
+      const dia = parts[2];
+      const horas = parts[3];
+      const clase = parts[4];
+
+      res.status(400).json({
+        error: `Tienes horarios duplicados en el formulario para ${salon} el ${dia} (${horas}) en la clase "${clase}".`,
+      });
+      return true;
+    }
+  }
+
+  if (message.includes("FECHAS_INVALIDAS")) {
+    const parts = message.split("|");
+    const startDate = parts[1] ?? "";
+    const endDate = parts[2] ?? "";
+
+    res.status(400).json({
+      error: `Rango de fechas invalido: la fecha de inicio (${startDate}) no puede ser mayor que la fecha de fin (${endDate}).`,
+    });
+    return true;
+  }
+
+  // Fallback to simple overlap detection
+  if (messageLower.includes("eventos_fechas_chk") || messageLower.includes("violates check constraint \"eventos_fechas_chk\"")) {
+    res.status(400).json({
+      error: "Rango de fechas invalido: la fecha de inicio no puede ser mayor que la fecha de fin.",
+    });
+    return true;
+  }
+
+  if (messageLower.includes("classslot_no_overlap") || messageLower.includes("overlap") || messageLower.includes("solap")) {
     res.status(409).json({
       error: "La reserva se solapa con otra clase en el mismo salon y horario.",
     });
     return true;
   }
 
-  if (message.includes("iglesia no debe tener facultad_id")) {
+  if (messageLower.includes("iglesia no debe tener facultad_id")) {
     res.status(400).json({
       error: "Las reservas de Iglesia no deben incluir facultad.",
     });
     return true;
   }
 
-  if (message.includes("iglesia no debe tener codigo_materia")) {
+  if (messageLower.includes("iglesia no debe tener codigo_materia")) {
     res.status(400).json({
       error: "Las reservas de Iglesia no deben incluir codigo de materia.",
     });
     return true;
   }
 
-  if (message.includes("iglesia requiere actividad")) {
+  if (messageLower.includes("iglesia requiere actividad")) {
     res.status(400).json({
       error: "Las reservas de Iglesia requieren una actividad.",
     });
@@ -348,7 +411,7 @@ schedulesRouter.put("/events/:eventId/:slotId", requireAdminKey, async (req, res
     const params = eventSlotParamsSchema.parse(req.params);
     const body = updateEventSchema.parse(req.body);
 
-    await updateScheduleEventSlot({
+    const updatePayload = {
       eventId: params.eventId,
       slotId: params.slotId,
       faculty: body.faculty,
@@ -361,7 +424,11 @@ schedulesRouter.put("/events/:eventId/:slotId", requireAdminKey, async (req, res
       room: body.room,
       startTime: body.start,
       endTime: body.end,
-    });
+      ...(body.targetDate ? { targetDate: toLocalDate(body.targetDate) } : {}),
+      ...(body.updateScope ? { updateScope: body.updateScope } : {}),
+    };
+
+    await updateScheduleEventSlot(updatePayload);
 
     // Notificar sobre evento actualizado
     broadcastScheduleRefresh();
