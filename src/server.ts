@@ -29,8 +29,10 @@ const configuredOrigins = (corsOriginsRaw ?? "")
   .map((origin) => normalizeOrigin(origin))
   .filter(Boolean);
 const allowedOrigins = Array.from(new Set([...alwaysAllowedOrigins, ...configuredOrigins].map((origin) => normalizeOrigin(origin))));
+const localOriginPattern = /^https?:\/\/(localhost|127\.0\.0\.1|192\.168\.\d{1,3}\.\d{1,3})(:\d+)?$/i;
 const isOriginAllowed = (origin?: string) => {
   if (!origin) return true;
+  if (localOriginPattern.test(origin.trim())) return true;
   return allowedOrigins.includes(normalizeOrigin(origin));
 };
 
