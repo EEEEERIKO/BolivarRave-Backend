@@ -18,6 +18,7 @@ import {
   sendTaskToReview,
   updateHabilidad,
   type TareaEstado,
+  type TareaModoAsignacion,
   type TareaPrioridad,
   type TareaTipo,
 } from "./service";
@@ -39,6 +40,8 @@ tasksRouter.use(async (_req, _res, next) => {
 const estadoEnum = ["Pendiente", "En Progreso", "En Revision", "Completada", "Rechazada", "Corregir", "Cancelada"] as const;
 const prioridadEnum = ["Baja", "Media", "Alta", "Urgente"] as const;
 const tipoEnum = ["Recurrente", "Esporadica"] as const;
+const modoAsignacionEnum = ["manual", "automatica"] as const;
+const programacionRecurrenteEnum = ["programada", "diaria_libre"] as const;
 
 const idParamsSchema = z.object({
   id: z.string().uuid(),
@@ -47,9 +50,49 @@ const idParamsSchema = z.object({
 const createCatalogSchema = z.object({
   nombre: z.string().trim().min(2).max(150),
   tipo: z.enum(tipoEnum),
-  habilidadRequeridaId: z.string().uuid().nullable().optional(),
+  sector: z.string().trim().min(2).max(120),
+  modoAsignacion: z.enum(modoAsignacionEnum),
+  cantidadPersonal: z.number().int().min(1).max(50),
+  habilidadesRequeridasIds: z.array(z.string().uuid()).max(30).default([]),
+  programacionRecurrente: z.enum(programacionRecurrenteEnum).default("diaria_libre"),
+  diasSemana: z.array(z.number().int().min(0).max(6)).max(7).default([]),
+  horaProgramada: z.string().regex(/^\d{2}:\d{2}$/).nullable().optional(),
+  fechaEsporadica: z.string().regex(/^\d{4}-\d{2}-\d{2}$/).nullable().optional(),
+  horaEsporadica: z.string().regex(/^\d{2}:\d{2}$/).nullable().optional(),
+  requiereFinalizacion: z.boolean().default(false),
+  tareaFinalizacion: z.string().trim().max(200).nullable().optional(),
+  fechaFinalizacion: z.string().regex(/^\d{4}-\d{2}-\d{2}$/).nullable().optional(),
+  horaFinalizacion: z.string().regex(/^\d{2}:\d{2}$/).nullable().optional(),
   tiempoEstimadoMin: z.number().int().min(1).max(24 * 60),
-  puntosOtorgados: z.number().int().min(0).max(10000),
+}).superRefine((value, ctx) => {
+  if (value.tipo === "Recurrente" && value.programacionRecurrente === "programada") {
+    if (value.diasSemana.length === 0) {
+      ctx.addIssue({ code: "custom", path: ["diasSemana"], message: "Selecciona al menos un dia para tareas recurrentes" });
+    }
+    if (!value.horaProgramada) {
+      ctx.addIssue({ code: "custom", path: ["horaProgramada"], message: "Define una hora para tareas recurrentes" });
+    }
+  }
+
+  if (value.tipo === "Esporadica" && !value.fechaEsporadica) {
+    ctx.addIssue({ code: "custom", path: ["fechaEsporadica"], message: "Define una fecha para tareas esporadicas" });
+  }
+
+  if (value.tipo === "Esporadica" && !value.horaEsporadica) {
+    ctx.addIssue({ code: "custom", path: ["horaEsporadica"], message: "Define una hora para tareas esporadicas" });
+  }
+
+  if (value.requiereFinalizacion) {
+    if (!value.tareaFinalizacion || value.tareaFinalizacion.trim().length < 2) {
+      ctx.addIssue({ code: "custom", path: ["tareaFinalizacion"], message: "Describe la tarea de finalizacion" });
+    }
+    if (!value.fechaFinalizacion) {
+      ctx.addIssue({ code: "custom", path: ["fechaFinalizacion"], message: "Define fecha de finalizacion" });
+    }
+    if (!value.horaFinalizacion) {
+      ctx.addIssue({ code: "custom", path: ["horaFinalizacion"], message: "Define hora de finalizacion" });
+    }
+  }
 });
 
 const createHabilidadSchema = z.object({
@@ -187,9 +230,23 @@ tasksRouter.post("/catalog", requireAdminKey, async (req, res, next) => {
     const created = await createTaskCatalog({
       nombre: parsed.nombre,
       tipo: parsed.tipo as TareaTipo,
-      habilidadRequeridaId: parsed.habilidadRequeridaId ?? null,
+      sector: parsed.sector,
+      modoAsignacion: parsed.modoAsignacion as TareaModoAsignacion,
+      cantidadPersonal: parsed.cantidadPersonal,
+      habilidadesRequeridasIds: Array.from(new Set(parsed.habilidadesRequeridasIds)),
+      diasSemana: parsed.tipo === "Recurrente" && parsed.programacionRecurrente === "programada"
+        ? Array.from(new Set(parsed.diasSemana)).sort((a, b) => a - b)
+        : [],
+      horaProgramada: parsed.tipo === "Recurrente" && parsed.programacionRecurrente === "programada"
+        ? (parsed.horaProgramada ?? null)
+        : null,
+      fechaEsporadica: parsed.fechaEsporadica ?? null,
+      horaEsporadica: parsed.tipo === "Esporadica" ? (parsed.horaEsporadica ?? null) : null,
+      requiereFinalizacion: parsed.requiereFinalizacion,
+      tareaFinalizacion: parsed.requiereFinalizacion ? (parsed.tareaFinalizacion ?? null) : null,
+      fechaFinalizacion: parsed.requiereFinalizacion ? (parsed.fechaFinalizacion ?? null) : null,
+      horaFinalizacion: parsed.requiereFinalizacion ? (parsed.horaFinalizacion ?? null) : null,
       tiempoEstimadoMin: parsed.tiempoEstimadoMin,
-      puntosOtorgados: parsed.puntosOtorgados,
     });
 
     return res.status(201).json({
@@ -372,7 +429,7 @@ tasksRouter.patch("/assignments/:id/review", async (req, res, next) => {
     });
 
     return res.json({
-      message: parsed.decision === "aprobar" ? "Tarea aprobada y puntaje aplicado" : "Tarea rechazada para correccion",
+      message: parsed.decision === "aprobar" ? "Tarea aprobada" : "Tarea rechazada para correccion",
       tareaInstanciaId: updated.tareaInstanciaId,
       estado: updated.estado,
     });

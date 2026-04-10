@@ -64,6 +64,22 @@ END $$;
 ALTER TYPE public.tarea_estado_enum ADD VALUE IF NOT EXISTS 'Rechazada';
 ALTER TYPE public.tarea_estado_enum ADD VALUE IF NOT EXISTS 'Corregir';
 
+DO $$
+BEGIN
+  IF NOT EXISTS (
+    SELECT 1
+    FROM pg_type t
+    JOIN pg_namespace n ON n.oid = t.typnamespace
+    WHERE t.typname = 'tarea_asignacion_modo_enum'
+      AND n.nspname = 'public'
+  ) THEN
+    CREATE TYPE public.tarea_asignacion_modo_enum AS ENUM (
+      'manual',
+      'automatica'
+    );
+  END IF;
+END $$;
+
 CREATE TABLE IF NOT EXISTS public.staff_habilidades (
   id uuid PRIMARY KEY DEFAULT gen_random_uuid(),
   staff_id uuid NOT NULL REFERENCES public.staff(id) ON DELETE CASCADE,
@@ -78,8 +94,27 @@ CREATE TABLE IF NOT EXISTS public.tareas_catalogo (
   habilidad_requerida_id uuid NULL REFERENCES public.habilidades(id) ON DELETE SET NULL,
   tiempo_estimado_min integer NOT NULL,
   puntos_otorgados integer NOT NULL,
+  sector varchar(120) NOT NULL DEFAULT 'General',
+  modo_asignacion public.tarea_asignacion_modo_enum NOT NULL DEFAULT 'manual',
+  cantidad_personal integer NOT NULL DEFAULT 1,
+  dias_semana smallint[] NULL,
+  hora_programada time NULL,
+  fecha_esporadica date NULL,
+  hora_esporadica time NULL,
+  requiere_finalizacion boolean NOT NULL DEFAULT false,
+  tarea_finalizacion varchar(200) NULL,
+  fecha_finalizacion date NULL,
+  hora_finalizacion time NULL,
   CONSTRAINT tareas_catalogo_tiempo_estimado_chk CHECK (tiempo_estimado_min > 0),
-  CONSTRAINT tareas_catalogo_puntos_chk CHECK (puntos_otorgados >= 0)
+  CONSTRAINT tareas_catalogo_puntos_chk CHECK (puntos_otorgados >= 0),
+  CONSTRAINT tareas_catalogo_cantidad_personal_chk CHECK (cantidad_personal > 0 AND cantidad_personal <= 50)
+);
+
+CREATE TABLE IF NOT EXISTS public.tareas_catalogo_habilidades (
+  id uuid PRIMARY KEY DEFAULT gen_random_uuid(),
+  tarea_catalogo_id uuid NOT NULL REFERENCES public.tareas_catalogo(id) ON DELETE CASCADE,
+  habilidad_id uuid NOT NULL REFERENCES public.habilidades(id) ON DELETE RESTRICT,
+  CONSTRAINT tareas_catalogo_habilidades_uq UNIQUE (tarea_catalogo_id, habilidad_id)
 );
 
 CREATE TABLE IF NOT EXISTS public.tareas_instancias (
@@ -123,6 +158,10 @@ CREATE INDEX IF NOT EXISTS idx_staff_habilidades_habilidad_id ON public.staff_ha
 
 CREATE INDEX IF NOT EXISTS idx_tareas_catalogo_tipo ON public.tareas_catalogo(tipo);
 CREATE INDEX IF NOT EXISTS idx_tareas_catalogo_habilidad_req ON public.tareas_catalogo(habilidad_requerida_id);
+CREATE INDEX IF NOT EXISTS idx_tareas_catalogo_sector ON public.tareas_catalogo(sector);
+CREATE INDEX IF NOT EXISTS idx_tareas_catalogo_modo_asignacion ON public.tareas_catalogo(modo_asignacion);
+CREATE INDEX IF NOT EXISTS idx_tareas_catalogo_habilidades_catalogo_id ON public.tareas_catalogo_habilidades(tarea_catalogo_id);
+CREATE INDEX IF NOT EXISTS idx_tareas_catalogo_habilidades_habilidad_id ON public.tareas_catalogo_habilidades(habilidad_id);
 
 CREATE INDEX IF NOT EXISTS idx_tareas_instancias_catalogo_id ON public.tareas_instancias(tarea_catalogo_id);
 CREATE INDEX IF NOT EXISTS idx_tareas_instancias_salon_id ON public.tareas_instancias(salon_id);
@@ -134,5 +173,11 @@ CREATE INDEX IF NOT EXISTS idx_tareas_asignaciones_tarea_instancia_id ON public.
 CREATE INDEX IF NOT EXISTS idx_tareas_asignaciones_staff_id ON public.tareas_asignaciones(staff_id);
 CREATE INDEX IF NOT EXISTS idx_tareas_asignaciones_monitor_id ON public.tareas_asignaciones(monitor_id);
 CREATE INDEX IF NOT EXISTS idx_tareas_asignaciones_fecha_revision ON public.tareas_asignaciones(fecha_revision);
+
+INSERT INTO public.tareas_catalogo_habilidades (tarea_catalogo_id, habilidad_id)
+SELECT tc.id, tc.habilidad_requerida_id
+FROM public.tareas_catalogo tc
+WHERE tc.habilidad_requerida_id IS NOT NULL
+ON CONFLICT (tarea_catalogo_id, habilidad_id) DO NOTHING;
 
 commit;

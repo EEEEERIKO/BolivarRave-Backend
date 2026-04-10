@@ -58,6 +58,21 @@ async function bootstrapTasksSchema() {
     `ALTER TYPE public.tarea_estado_enum ADD VALUE IF NOT EXISTS 'Rechazada'`,
     `ALTER TYPE public.tarea_estado_enum ADD VALUE IF NOT EXISTS 'Corregir'`,
     `
+      DO $$
+      BEGIN
+        IF NOT EXISTS (
+          SELECT 1
+          FROM pg_type t
+          JOIN pg_namespace n ON n.oid = t.typnamespace
+          WHERE t.typname = 'tarea_asignacion_modo_enum'
+            AND n.nspname = 'public'
+        ) THEN
+          CREATE TYPE public.tarea_asignacion_modo_enum AS ENUM ('manual', 'automatica');
+        END IF;
+      END
+      $$
+    `,
+    `
       CREATE TABLE IF NOT EXISTS public.staff_habilidades (
         id uuid PRIMARY KEY DEFAULT gen_random_uuid(),
         staff_id uuid NOT NULL REFERENCES public.staff(id) ON DELETE CASCADE,
@@ -76,6 +91,48 @@ async function bootstrapTasksSchema() {
         CONSTRAINT tareas_catalogo_tiempo_estimado_chk CHECK (tiempo_estimado_min > 0),
         CONSTRAINT tareas_catalogo_puntos_chk CHECK (puntos_otorgados >= 0)
       )
+    `,
+    `ALTER TABLE public.tareas_catalogo ADD COLUMN IF NOT EXISTS sector varchar(120) NOT NULL DEFAULT 'General'`,
+    `ALTER TABLE public.tareas_catalogo ADD COLUMN IF NOT EXISTS modo_asignacion public.tarea_asignacion_modo_enum NOT NULL DEFAULT 'manual'`,
+    `ALTER TABLE public.tareas_catalogo ADD COLUMN IF NOT EXISTS cantidad_personal integer NOT NULL DEFAULT 1`,
+    `ALTER TABLE public.tareas_catalogo ADD COLUMN IF NOT EXISTS dias_semana smallint[] NULL`,
+    `ALTER TABLE public.tareas_catalogo ADD COLUMN IF NOT EXISTS hora_programada time NULL`,
+    `ALTER TABLE public.tareas_catalogo ADD COLUMN IF NOT EXISTS fecha_esporadica date NULL`,
+    `ALTER TABLE public.tareas_catalogo ADD COLUMN IF NOT EXISTS hora_esporadica time NULL`,
+    `ALTER TABLE public.tareas_catalogo ADD COLUMN IF NOT EXISTS requiere_finalizacion boolean NOT NULL DEFAULT false`,
+    `ALTER TABLE public.tareas_catalogo ADD COLUMN IF NOT EXISTS tarea_finalizacion varchar(200) NULL`,
+    `ALTER TABLE public.tareas_catalogo ADD COLUMN IF NOT EXISTS fecha_finalizacion date NULL`,
+    `ALTER TABLE public.tareas_catalogo ADD COLUMN IF NOT EXISTS hora_finalizacion time NULL`,
+    `ALTER TABLE public.tareas_catalogo ALTER COLUMN puntos_otorgados SET DEFAULT 0`,
+    `
+      DO $$
+      BEGIN
+        IF NOT EXISTS (
+          SELECT 1
+          FROM pg_constraint
+          WHERE conname = 'tareas_catalogo_cantidad_personal_chk'
+            AND conrelid = 'public.tareas_catalogo'::regclass
+        ) THEN
+          ALTER TABLE public.tareas_catalogo
+            ADD CONSTRAINT tareas_catalogo_cantidad_personal_chk CHECK (cantidad_personal > 0 AND cantidad_personal <= 50);
+        END IF;
+      END
+      $$
+    `,
+    `
+      CREATE TABLE IF NOT EXISTS public.tareas_catalogo_habilidades (
+        id uuid PRIMARY KEY DEFAULT gen_random_uuid(),
+        tarea_catalogo_id uuid NOT NULL REFERENCES public.tareas_catalogo(id) ON DELETE CASCADE,
+        habilidad_id uuid NOT NULL REFERENCES public.habilidades(id) ON DELETE RESTRICT,
+        CONSTRAINT tareas_catalogo_habilidades_uq UNIQUE (tarea_catalogo_id, habilidad_id)
+      )
+    `,
+    `
+      INSERT INTO public.tareas_catalogo_habilidades (tarea_catalogo_id, habilidad_id)
+      SELECT tc.id, tc.habilidad_requerida_id
+      FROM public.tareas_catalogo tc
+      WHERE tc.habilidad_requerida_id IS NOT NULL
+      ON CONFLICT (tarea_catalogo_id, habilidad_id) DO NOTHING
     `,
     `
       CREATE TABLE IF NOT EXISTS public.tareas_instancias (
@@ -113,6 +170,10 @@ async function bootstrapTasksSchema() {
     `CREATE INDEX IF NOT EXISTS idx_staff_habilidades_habilidad_id ON public.staff_habilidades(habilidad_id)`,
     `CREATE INDEX IF NOT EXISTS idx_tareas_catalogo_tipo ON public.tareas_catalogo(tipo)`,
     `CREATE INDEX IF NOT EXISTS idx_tareas_catalogo_habilidad_req ON public.tareas_catalogo(habilidad_requerida_id)`,
+    `CREATE INDEX IF NOT EXISTS idx_tareas_catalogo_sector ON public.tareas_catalogo(sector)`,
+    `CREATE INDEX IF NOT EXISTS idx_tareas_catalogo_modo_asignacion ON public.tareas_catalogo(modo_asignacion)`,
+    `CREATE INDEX IF NOT EXISTS idx_tareas_catalogo_habilidades_catalogo_id ON public.tareas_catalogo_habilidades(tarea_catalogo_id)`,
+    `CREATE INDEX IF NOT EXISTS idx_tareas_catalogo_habilidades_habilidad_id ON public.tareas_catalogo_habilidades(habilidad_id)`,
     `CREATE INDEX IF NOT EXISTS idx_tareas_instancias_catalogo_id ON public.tareas_instancias(tarea_catalogo_id)`,
     `CREATE INDEX IF NOT EXISTS idx_tareas_instancias_salon_id ON public.tareas_instancias(salon_id)`,
     `CREATE INDEX IF NOT EXISTS idx_tareas_instancias_estado ON public.tareas_instancias(estado)`,
@@ -143,14 +204,25 @@ export async function ensureTasksSchema() {
 export type TareaTipo = "Recurrente" | "Esporadica";
 export type TareaPrioridad = "Baja" | "Media" | "Alta" | "Urgente";
 export type TareaEstado = "Pendiente" | "En Progreso" | "En Revision" | "Completada" | "Rechazada" | "Corregir" | "Cancelada";
+export type TareaModoAsignacion = "manual" | "automatica";
 
 export type CatalogoTask = {
   id: string;
   nombre: string;
   tipo: TareaTipo;
-  habilidadRequeridaId: string | null;
+  sector: string;
+  modoAsignacion: TareaModoAsignacion;
+  cantidadPersonal: number;
+  habilidadesRequeridasIds: string[];
+  diasSemana: number[];
+  horaProgramada: string | null;
+  fechaEsporadica: string | null;
+  horaEsporadica: string | null;
+  requiereFinalizacion: boolean;
+  tareaFinalizacion: string | null;
+  fechaFinalizacion: string | null;
+  horaFinalizacion: string | null;
   tiempoEstimadoMin: number;
-  puntosOtorgados: number;
 };
 
 export type Habilidad = {
@@ -188,9 +260,19 @@ export type TareaInstanciaResumen = {
 export type CreateCatalogTaskInput = {
   nombre: string;
   tipo: TareaTipo;
-  habilidadRequeridaId: string | null;
+  sector: string;
+  modoAsignacion: TareaModoAsignacion;
+  cantidadPersonal: number;
+  habilidadesRequeridasIds: string[];
+  diasSemana: number[];
+  horaProgramada: string | null;
+  fechaEsporadica: string | null;
+  horaEsporadica: string | null;
+  requiereFinalizacion: boolean;
+  tareaFinalizacion: string | null;
+  fechaFinalizacion: string | null;
+  horaFinalizacion: string | null;
   tiempoEstimadoMin: number;
-  puntosOtorgados: number;
 };
 
 export type CreateTaskInstanceInput = {
@@ -229,9 +311,19 @@ type CatalogoTaskRow = {
   id: string;
   nombre: string;
   tipo: TareaTipo;
-  habilidad_requerida_id: string | null;
+  sector: string;
+  modo_asignacion: TareaModoAsignacion;
+  cantidad_personal: number;
+  habilidades_requeridas_ids: string[];
+  dias_semana: number[];
+  hora_programada: string | null;
+  fecha_esporadica: string | null;
+  hora_esporadica: string | null;
+  requiere_finalizacion: boolean;
+  tarea_finalizacion: string | null;
+  fecha_finalizacion: string | null;
+  hora_finalizacion: string | null;
   tiempo_estimado_min: number;
-  puntos_otorgados: number;
 };
 
 type HabilidadRow = {
@@ -272,10 +364,22 @@ export const listTaskCatalog = async () => {
       t.id::text AS id,
       t.nombre,
       t.tipo::text AS tipo,
-      t.habilidad_requerida_id::text AS habilidad_requerida_id,
-      t.tiempo_estimado_min,
-      t.puntos_otorgados
+      t.sector,
+      t.modo_asignacion::text AS modo_asignacion,
+      t.cantidad_personal,
+      COALESCE(array_agg(DISTINCT tch.habilidad_id::text) FILTER (WHERE tch.habilidad_id IS NOT NULL), ARRAY[]::text[]) AS habilidades_requeridas_ids,
+      COALESCE(t.dias_semana, ARRAY[]::smallint[])::int[] AS dias_semana,
+      TO_CHAR(t.hora_programada, 'HH24:MI') AS hora_programada,
+      TO_CHAR(t.fecha_esporadica, 'YYYY-MM-DD') AS fecha_esporadica,
+      TO_CHAR(t.hora_esporadica, 'HH24:MI') AS hora_esporadica,
+      t.requiere_finalizacion,
+      t.tarea_finalizacion,
+      TO_CHAR(t.fecha_finalizacion, 'YYYY-MM-DD') AS fecha_finalizacion,
+      TO_CHAR(t.hora_finalizacion, 'HH24:MI') AS hora_finalizacion,
+      t.tiempo_estimado_min
     FROM public.tareas_catalogo t
+    LEFT JOIN public.tareas_catalogo_habilidades tch ON tch.tarea_catalogo_id = t.id
+    GROUP BY t.id
     ORDER BY t.nombre ASC
   `;
 
@@ -283,37 +387,77 @@ export const listTaskCatalog = async () => {
     id: row.id,
     nombre: row.nombre,
     tipo: row.tipo,
-    habilidadRequeridaId: row.habilidad_requerida_id,
+    sector: row.sector,
+    modoAsignacion: row.modo_asignacion,
+    cantidadPersonal: row.cantidad_personal,
+    habilidadesRequeridasIds: row.habilidades_requeridas_ids,
+    diasSemana: row.dias_semana,
+    horaProgramada: row.hora_programada,
+    fechaEsporadica: row.fecha_esporadica,
+    horaEsporadica: row.hora_esporadica,
+    requiereFinalizacion: row.requiere_finalizacion,
+    tareaFinalizacion: row.tarea_finalizacion,
+    fechaFinalizacion: row.fecha_finalizacion,
+    horaFinalizacion: row.hora_finalizacion,
     tiempoEstimadoMin: row.tiempo_estimado_min,
-    puntosOtorgados: row.puntos_otorgados,
   } satisfies CatalogoTask));
 };
 
 export const createTaskCatalog = async (payload: CreateCatalogTaskInput) => {
-  const created = await prisma.$queryRaw<Array<{ id: string }>>`
-    INSERT INTO public.tareas_catalogo (
-      nombre,
-      tipo,
-      habilidad_requerida_id,
-      tiempo_estimado_min,
-      puntos_otorgados
-    )
-    VALUES (
-      ${payload.nombre},
-      ${payload.tipo}::public.tarea_tipo_enum,
-      ${payload.habilidadRequeridaId}::uuid,
-      ${payload.tiempoEstimadoMin},
-      ${payload.puntosOtorgados}
-    )
-    RETURNING id::text AS id
-  `;
+  return prisma.$transaction(async (tx) => {
+    const created = await tx.$queryRaw<Array<{ id: string }>>`
+      INSERT INTO public.tareas_catalogo (
+        nombre,
+        tipo,
+        tiempo_estimado_min,
+        puntos_otorgados,
+        sector,
+        modo_asignacion,
+        cantidad_personal,
+        dias_semana,
+        hora_programada,
+        fecha_esporadica,
+        hora_esporadica,
+        requiere_finalizacion,
+        tarea_finalizacion,
+        fecha_finalizacion,
+        hora_finalizacion
+      )
+      VALUES (
+        ${payload.nombre},
+        ${payload.tipo}::public.tarea_tipo_enum,
+        ${payload.tiempoEstimadoMin},
+        0,
+        ${payload.sector},
+        ${payload.modoAsignacion}::public.tarea_asignacion_modo_enum,
+        ${payload.cantidadPersonal},
+        ${payload.diasSemana}::smallint[],
+        ${payload.horaProgramada}::time,
+        ${payload.fechaEsporadica}::date,
+        ${payload.horaEsporadica}::time,
+        ${payload.requiereFinalizacion},
+        ${payload.tareaFinalizacion},
+        ${payload.fechaFinalizacion}::date,
+        ${payload.horaFinalizacion}::time
+      )
+      RETURNING id::text AS id
+    `;
 
-  const id = created[0]?.id;
-  if (!id) {
-    throw new Error("No se pudo crear la tarea de catalogo");
-  }
+    const id = created[0]?.id;
+    if (!id) {
+      throw new Error("No se pudo crear la tarea de catalogo");
+    }
 
-  return { id };
+    for (const skillId of payload.habilidadesRequeridasIds) {
+      await tx.$executeRaw`
+        INSERT INTO public.tareas_catalogo_habilidades (tarea_catalogo_id, habilidad_id)
+        VALUES (${id}::uuid, ${skillId}::uuid)
+        ON CONFLICT (tarea_catalogo_id, habilidad_id) DO NOTHING
+      `;
+    }
+
+    return { id };
+  });
 };
 
 export const listHabilidades = async () => {
@@ -584,16 +728,30 @@ export const createTaskInstance = async (payload: CreateTaskInstanceInput) => {
 
 export const assignTaskToStaff = async (payload: AssignTaskInput) => {
   return prisma.$transaction(async (tx) => {
-    const instance = await tx.$queryRaw<Array<{ id: string; estado: TareaEstado }>>`
-      SELECT id::text AS id, estado::text AS estado
-      FROM public.tareas_instancias
-      WHERE id = ${payload.tareaInstanciaId}::uuid
+    const instance = await tx.$queryRaw<Array<{ id: string; estado: TareaEstado; cantidad_personal: number }>>`
+      SELECT
+        ti.id::text AS id,
+        ti.estado::text AS estado,
+        tc.cantidad_personal
+      FROM public.tareas_instancias ti
+      INNER JOIN public.tareas_catalogo tc ON tc.id = ti.tarea_catalogo_id
+      WHERE ti.id = ${payload.tareaInstanciaId}::uuid
       LIMIT 1
     `;
 
     const target = instance[0];
     if (!target) {
       throw new Error("No se encontro la instancia de tarea");
+    }
+
+    const assignmentCount = await tx.$queryRaw<Array<{ total: number }>>`
+      SELECT COUNT(*)::int AS total
+      FROM public.tareas_asignaciones
+      WHERE tarea_instancia_id = ${payload.tareaInstanciaId}::uuid
+    `;
+
+    if ((assignmentCount[0]?.total ?? 0) >= target.cantidad_personal) {
+      throw new Error("La tarea ya alcanzo la cantidad maxima de personal asignado");
     }
 
     const staffExists = await tx.$queryRaw<Array<{ id: string }>>`
@@ -714,8 +872,8 @@ export const sendTaskToReview = async (asignacionId: string) => {
 
 export const reviewTaskAssignment = async (payload: ReviewDecisionInput) => {
   return prisma.$transaction(async (tx) => {
-    const row = await tx.$queryRaw<Array<{ id: string; tarea_instancia_id: string; staff_id: string }>>`
-      SELECT id::text AS id, tarea_instancia_id::text AS tarea_instancia_id, staff_id::text AS staff_id
+    const row = await tx.$queryRaw<Array<{ id: string; tarea_instancia_id: string }>>`
+      SELECT id::text AS id, tarea_instancia_id::text AS tarea_instancia_id
       FROM public.tareas_asignaciones
       WHERE id = ${payload.asignacionId}::uuid
       LIMIT 1
@@ -743,12 +901,12 @@ export const reviewTaskAssignment = async (payload: ReviewDecisionInput) => {
 
     const targetState: TareaEstado = payload.aprobar ? "Completada" : payload.rechazoEstado;
 
-    const updatedInstance = await tx.$queryRaw<Array<{ id: string; tarea_catalogo_id: string }>>`
+    const updatedInstance = await tx.$queryRaw<Array<{ id: string }>>`
       UPDATE public.tareas_instancias
       SET estado = ${targetState}::public.tarea_estado_enum
       WHERE id = ${assignment.tarea_instancia_id}::uuid
         AND estado = 'En Revision'::public.tarea_estado_enum
-      RETURNING id::text AS id, tarea_catalogo_id::text AS tarea_catalogo_id
+      RETURNING id::text AS id
     `;
 
     const instance = updatedInstance[0];
@@ -764,25 +922,6 @@ export const reviewTaskAssignment = async (payload: ReviewDecisionInput) => {
         observaciones_revision = ${payload.observacionesRevision}
       WHERE id = ${payload.asignacionId}::uuid
     `;
-
-    if (payload.aprobar) {
-      const points = await tx.$queryRaw<Array<{ puntos_otorgados: number }>>`
-        SELECT puntos_otorgados
-        FROM public.tareas_catalogo
-        WHERE id = ${instance.tarea_catalogo_id}::uuid
-        LIMIT 1
-      `;
-
-      const awardedPoints = points[0]?.puntos_otorgados ?? 0;
-
-      if (awardedPoints > 0) {
-        await tx.$executeRaw`
-          UPDATE public.staff
-          SET balance_horas = balance_horas + ${awardedPoints}
-          WHERE id = ${assignment.staff_id}::uuid
-        `;
-      }
-    }
 
     return { tareaInstanciaId: assignment.tarea_instancia_id, estado: targetState };
   });
