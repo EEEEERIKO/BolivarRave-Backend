@@ -88,6 +88,123 @@ const ensureSlotExceptionsTable = async () => {
   `);
 };
 
+let ensureOverlapFunctionPromise: Promise<void> | null = null;
+
+const ensureOverlapValidationFunction = async () => {
+  await ensureSlotExceptionsTable();
+
+  await prisma.$executeRawUnsafe(`
+    create or replace function public.verificar_solape_horario(
+      p_evento_id uuid,
+      p_salon_id uuid,
+      p_dia public.dia_semana_enum,
+      p_hora_inicio time,
+      p_hora_fin time,
+      p_horario_id uuid default null,
+      p_target_date date default null
+    )
+    returns void
+    language plpgsql
+    as $$
+    declare
+      v_nuevo_inicio date;
+      v_nuevo_fin date;
+      v_target_date date;
+      v_conflicto record;
+      v_nombre_salon text;
+      v_nombre_dia text;
+      v_hora_conflicto text;
+    begin
+      select e.fecha_inicio, e.fecha_fin
+        into v_nuevo_inicio, v_nuevo_fin
+      from public.eventos e
+      where e.id = p_evento_id;
+
+      if v_nuevo_inicio is null then
+        raise exception 'Evento no encontrado para validar solape: %', p_evento_id;
+      end if;
+
+      v_target_date := p_target_date;
+      if v_target_date is null and v_nuevo_inicio = v_nuevo_fin then
+        v_target_date := v_nuevo_inicio;
+      end if;
+
+      select
+        h.id,
+        h.evento_id,
+        e.nombre_principal,
+        coalesce(x.hora_inicio, h.hora_inicio) as hora_inicio,
+        coalesce(x.hora_fin, h.hora_fin) as hora_fin,
+        coalesce(sx.nombre_bloque, sb.nombre_bloque) as nombre_bloque,
+        coalesce(x.dia_semana, h.dia_semana) as dia_semana
+        into v_conflicto
+      from public.horarios_evento h
+      join public.eventos e on e.id = h.evento_id
+      join public.salones sb on sb.id = h.salon_id
+      left join public.horarios_evento_excepciones x
+        on x.horario_id = h.id
+       and x.fecha = v_target_date
+      left join public.salones sx on sx.id = x.salon_id
+      where coalesce(x.salon_id, h.salon_id) = p_salon_id
+        and coalesce(x.dia_semana, h.dia_semana) = p_dia
+        and (p_hora_inicio < coalesce(x.hora_fin, h.hora_fin) and coalesce(x.hora_inicio, h.hora_inicio) < p_hora_fin)
+        and (v_target_date is null or
+            (v_target_date >= v_nuevo_inicio and v_target_date <= v_nuevo_fin and
+             v_target_date >= e.fecha_inicio and v_target_date <= e.fecha_fin))
+        and (v_target_date is not null or
+             daterange(v_nuevo_inicio, v_nuevo_fin, '[]') && daterange(e.fecha_inicio, e.fecha_fin, '[]'))
+        and (p_horario_id is null or h.id <> p_horario_id)
+        and h.evento_id <> p_evento_id
+      limit 1;
+
+      if v_conflicto is not null then
+        v_nombre_salon := coalesce(v_conflicto.nombre_bloque, 'Salón desconocido');
+        v_nombre_dia := case p_dia
+          when 'Lunes'::public.dia_semana_enum then 'Lunes'
+          when 'Martes'::public.dia_semana_enum then 'Martes'
+          when 'Miercoles'::public.dia_semana_enum then 'Miércoles'
+          when 'Jueves'::public.dia_semana_enum then 'Jueves'
+          when 'Viernes'::public.dia_semana_enum then 'Viernes'
+          when 'Sabado'::public.dia_semana_enum then 'Sábado'
+          when 'Domingo'::public.dia_semana_enum then 'Domingo'
+          else 'Día desconocido'
+        end;
+        v_hora_conflicto := (v_conflicto.hora_inicio)::text || '-' || (v_conflicto.hora_fin)::text;
+
+        raise exception
+          'CONFLICTO_SOLAPE|%|%|%|%|%',
+          v_nombre_salon,
+          v_nombre_dia,
+          v_hora_conflicto,
+          p_hora_inicio::text || '-' || p_hora_fin::text,
+          v_conflicto.nombre_principal;
+      end if;
+    end;
+    $$;
+
+    alter function public.verificar_solape_horario(
+      uuid,
+      uuid,
+      public.dia_semana_enum,
+      time,
+      time,
+      uuid,
+      date
+    ) set search_path = public, pg_temp;
+  `);
+};
+
+const ensureOverlapValidationReady = async () => {
+  if (!ensureOverlapFunctionPromise) {
+    ensureOverlapFunctionPromise = ensureOverlapValidationFunction().catch((error) => {
+      ensureOverlapFunctionPromise = null;
+      throw error;
+    });
+  }
+
+  await ensureOverlapFunctionPromise;
+};
+
 const COLORS: GroupedClass["color"][] = ["blue", "emerald", "amber", "violet"];
 
 const colorForKey = (key: string): GroupedClass["color"] => {
@@ -631,6 +748,8 @@ export const replaceAllSchedulesFromRows = async (
 };
 
 export const createScheduleEvent = async (payload: CreateScheduleEventInput) => {
+  await ensureOverlapValidationReady();
+
   return prisma.$transaction(async (tx) => {
     const facultyIdByName = new Map<string, string>();
     const roomIdByName = new Map<string, string>();
@@ -784,6 +903,8 @@ export const createScheduleEvent = async (payload: CreateScheduleEventInput) => 
 };
 
 export const updateScheduleEventSlot = async (payload: UpdateScheduleEventSlotInput) => {
+  await ensureOverlapValidationReady();
+
   return prisma.$transaction(async (tx) => {
     const canonicalDay = canonicalDayName(payload.day);
     if (!canonicalDay) {
