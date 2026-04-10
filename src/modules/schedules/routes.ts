@@ -144,6 +144,51 @@ const toMinutes = (value: string) => {
   return (hour ?? 0) * 60 + (minute ?? 0);
 };
 
+const normalizeComparable = (value: string) =>
+  value
+    .normalize("NFD")
+    .replace(/[\u0300-\u036f]/g, "")
+    .trim()
+    .toLowerCase();
+
+const dateRangesOverlap = (aStart: string, aEnd: string, bStart: string, bEnd: string) =>
+  aStart <= bEnd && bStart <= aEnd;
+
+const timeRangesOverlap = (aStart: string, aEnd: string, bStart: string, bEnd: string) =>
+  toMinutes(aStart) < toMinutes(bEnd) && toMinutes(bStart) < toMinutes(aEnd);
+
+const findCreateEventOverlap = async (payload: z.infer<typeof createEventSchema>) => {
+  const events = await getScheduleEvents();
+  const targetStart = payload.startDate;
+  const targetEnd = payload.endDate;
+
+  for (const slot of payload.slots) {
+    const slotDay = normalizeComparable(slot.day);
+    const slotRoom = normalizeComparable(slot.room);
+
+    const conflict = events.find((event) => {
+      const sameDay = normalizeComparable(event.day) === slotDay;
+      const sameRoom = normalizeComparable(event.room) === slotRoom;
+      const overlapDates = dateRangesOverlap(targetStart, targetEnd, event.startDate, event.endDate);
+      const overlapTimes = timeRangesOverlap(slot.start, slot.end, event.start, event.end);
+      return sameDay && sameRoom && overlapDates && overlapTimes;
+    });
+
+    if (conflict) {
+      return {
+        room: conflict.room,
+        day: conflict.day,
+        subject: conflict.subject,
+        conflictTime: `${conflict.start}-${conflict.end}`,
+        requestedTime: `${slot.start}-${slot.end}`,
+        conflictRange: `${conflict.startDate} a ${conflict.endDate}`,
+      };
+    }
+  }
+
+  return null;
+};
+
 const weekDayFromIsoDate = (isoDate: string) => {
   const [y, m, d] = isoDate.split("-").map(Number);
   const date = new Date(y ?? 0, (m ?? 1) - 1, d ?? 1);
@@ -383,8 +428,11 @@ schedulesRouter.get("/events", async (_req, res, next) => {
 });
 
 schedulesRouter.post("/events", requireAdminKey, async (req, res, next) => {
+  let parsedPayload: z.infer<typeof createEventSchema> | null = null;
+
   try {
     const parsed = createEventSchema.parse(req.body);
+    parsedPayload = parsed;
 
     const created = await createScheduleEvent({
       reservationType: parsed.reservationType,
@@ -411,6 +459,26 @@ schedulesRouter.post("/events", requireAdminKey, async (req, res, next) => {
       return res.status(400).json({
         error: `Payload de creacion invalido: ${error.issues[0]?.message ?? "error de validacion"}`,
       });
+    }
+
+    if (parsedPayload && error instanceof Error) {
+      const messageLower = error.message.toLowerCase();
+      if (messageLower.includes("classslot_no_overlap") || messageLower.includes("overlap") || messageLower.includes("solap")) {
+        const detail = await findCreateEventOverlap(parsedPayload);
+        if (detail) {
+          return res.status(409).json({
+            error: `Solapamiento detectado en ${detail.room} el ${detail.day}. La clase "${detail.subject}" ocupa ${detail.conflictTime}, pero intentaste usar ${detail.requestedTime} (rango: ${detail.conflictRange}).`,
+            details: {
+              salon: detail.room,
+              dia: detail.day,
+              claseConflictiva: detail.subject,
+              horaConflictiva: detail.conflictTime,
+              horaIntentada: detail.requestedTime,
+              rangoExistente: detail.conflictRange,
+            },
+          });
+        }
+      }
     }
 
     if (handleKnownScheduleWriteError(error, res)) {
