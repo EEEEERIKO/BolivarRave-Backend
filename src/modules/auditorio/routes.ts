@@ -2,6 +2,7 @@ import { Router } from "express";
 import { z } from "zod";
 import { broadcastScheduleRefresh } from "../../lib/websocket";
 import {
+  buildReservasAuditorioHistoryExcel,
   createReservaAuditorio,
   deleteReservaAuditorio,
   listReservasAuditorio,
@@ -160,6 +161,20 @@ auditorioRouter.get("/reservas", async (_req, res, next) => {
   try {
     const reservas = await listReservasAuditorio();
     return res.json({ reservas });
+  } catch (error) {
+    return next(error);
+  }
+});
+
+auditorioRouter.get("/reservas/export", async (_req, res, next) => {
+  try {
+    const { buffer, fileName } = await buildReservasAuditorioHistoryExcel();
+
+    res.setHeader("Content-Type", "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet");
+    res.setHeader("Content-Disposition", `attachment; filename=\"${fileName}\"`);
+    res.setHeader("Content-Length", String(buffer.length));
+
+    return res.status(200).send(buffer);
   } catch (error) {
     return next(error);
   }

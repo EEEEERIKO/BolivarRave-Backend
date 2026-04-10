@@ -275,6 +275,10 @@ export type CreateCatalogTaskInput = {
   tiempoEstimadoMin: number;
 };
 
+export type UpdateCatalogTaskInput = CreateCatalogTaskInput & {
+  id: string;
+};
+
 export type CreateTaskInstanceInput = {
   tareaCatalogoId: string;
   salonId: string | null;
@@ -457,6 +461,79 @@ export const createTaskCatalog = async (payload: CreateCatalogTaskInput) => {
     }
 
     return { id };
+  });
+};
+
+export const updateTaskCatalog = async (payload: UpdateCatalogTaskInput) => {
+  return prisma.$transaction(async (tx) => {
+    const updated = await tx.$queryRaw<Array<{ id: string }>>`
+      UPDATE public.tareas_catalogo
+      SET
+        nombre = ${payload.nombre},
+        tipo = ${payload.tipo}::public.tarea_tipo_enum,
+        tiempo_estimado_min = ${payload.tiempoEstimadoMin},
+        sector = ${payload.sector},
+        modo_asignacion = ${payload.modoAsignacion}::public.tarea_asignacion_modo_enum,
+        cantidad_personal = ${payload.cantidadPersonal},
+        dias_semana = ${payload.diasSemana}::smallint[],
+        hora_programada = ${payload.horaProgramada}::time,
+        fecha_esporadica = ${payload.fechaEsporadica}::date,
+        hora_esporadica = ${payload.horaEsporadica}::time,
+        requiere_finalizacion = ${payload.requiereFinalizacion},
+        tarea_finalizacion = ${payload.tareaFinalizacion},
+        fecha_finalizacion = ${payload.fechaFinalizacion}::date,
+        hora_finalizacion = ${payload.horaFinalizacion}::time
+      WHERE id = ${payload.id}::uuid
+      RETURNING id::text AS id
+    `;
+
+    const id = updated[0]?.id;
+    if (!id) {
+      throw new Error("No se encontro la tarea de catalogo a modificar");
+    }
+
+    await tx.$executeRaw`
+      DELETE FROM public.tareas_catalogo_habilidades
+      WHERE tarea_catalogo_id = ${id}::uuid
+    `;
+
+    for (const skillId of payload.habilidadesRequeridasIds) {
+      await tx.$executeRaw`
+        INSERT INTO public.tareas_catalogo_habilidades (tarea_catalogo_id, habilidad_id)
+        VALUES (${id}::uuid, ${skillId}::uuid)
+        ON CONFLICT (tarea_catalogo_id, habilidad_id) DO NOTHING
+      `;
+    }
+
+    return { id };
+  });
+};
+
+export const deleteTaskCatalog = async (id: string) => {
+  return prisma.$transaction(async (tx) => {
+    const usage = await tx.$queryRaw<Array<{ total: number }>>`
+      SELECT COUNT(*)::int AS total
+      FROM public.tareas_instancias
+      WHERE tarea_catalogo_id = ${id}::uuid
+    `;
+
+    if ((usage[0]?.total ?? 0) > 0) {
+      throw new Error("No se puede eliminar: esta tarea de catalogo ya tiene instancias creadas");
+    }
+
+    const deleted = await tx.$queryRaw<Array<{ id: string }>>`
+      DELETE FROM public.tareas_catalogo
+      WHERE id = ${id}::uuid
+      RETURNING id::text AS id
+    `;
+
+    const deletedId = deleted[0]?.id;
+    if (!deletedId) {
+      // Idempotent delete: if the record is already gone, treat it as deleted.
+      return { id };
+    }
+
+    return { id: deletedId };
   });
 };
 

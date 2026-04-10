@@ -5,6 +5,7 @@ import {
   createHabilidad,
   createTaskCatalog,
   createTaskInstance,
+  deleteTaskCatalog,
   deleteHabilidad,
   ensureTasksSchema,
   linkStaffHabilidad,
@@ -16,6 +17,7 @@ import {
   unlinkStaffHabilidad,
   reviewTaskAssignment,
   sendTaskToReview,
+  updateTaskCatalog,
   updateHabilidad,
   type TareaEstado,
   type TareaModoAsignacion,
@@ -256,6 +258,65 @@ tasksRouter.post("/catalog", requireAdminKey, async (req, res, next) => {
   } catch (error) {
     if (error instanceof z.ZodError) {
       return res.status(400).json({ error: `Payload invalido: ${error.issues[0]?.message ?? "error de validacion"}` });
+    }
+
+    return next(error);
+  }
+});
+
+tasksRouter.put("/catalog/:id", requireAdminKey, async (req, res, next) => {
+  try {
+    const { id } = idParamsSchema.parse(req.params);
+    const parsed = createCatalogSchema.parse(req.body);
+
+    const updated = await updateTaskCatalog({
+      id,
+      nombre: parsed.nombre,
+      tipo: parsed.tipo as TareaTipo,
+      sector: parsed.sector,
+      modoAsignacion: parsed.modoAsignacion as TareaModoAsignacion,
+      cantidadPersonal: parsed.cantidadPersonal,
+      habilidadesRequeridasIds: Array.from(new Set(parsed.habilidadesRequeridasIds)),
+      diasSemana: parsed.tipo === "Recurrente" && parsed.programacionRecurrente === "programada"
+        ? Array.from(new Set(parsed.diasSemana)).sort((a, b) => a - b)
+        : [],
+      horaProgramada: parsed.tipo === "Recurrente" && parsed.programacionRecurrente === "programada"
+        ? (parsed.horaProgramada ?? null)
+        : null,
+      fechaEsporadica: parsed.fechaEsporadica ?? null,
+      horaEsporadica: parsed.tipo === "Esporadica" ? (parsed.horaEsporadica ?? null) : null,
+      requiereFinalizacion: parsed.requiereFinalizacion,
+      tareaFinalizacion: parsed.requiereFinalizacion ? (parsed.tareaFinalizacion ?? null) : null,
+      fechaFinalizacion: parsed.requiereFinalizacion ? (parsed.fechaFinalizacion ?? null) : null,
+      horaFinalizacion: parsed.requiereFinalizacion ? (parsed.horaFinalizacion ?? null) : null,
+      tiempoEstimadoMin: parsed.tiempoEstimadoMin,
+    });
+
+    return res.json({
+      message: "Tarea de catalogo actualizada correctamente",
+      id: updated.id,
+    });
+  } catch (error) {
+    if (error instanceof z.ZodError) {
+      return res.status(400).json({ error: `Payload invalido: ${error.issues[0]?.message ?? "error de validacion"}` });
+    }
+
+    return next(error);
+  }
+});
+
+tasksRouter.delete("/catalog/:id", requireAdminKey, async (req, res, next) => {
+  try {
+    const { id } = idParamsSchema.parse(req.params);
+    const deleted = await deleteTaskCatalog(id);
+
+    return res.json({
+      message: "Tarea de catalogo eliminada correctamente",
+      id: deleted.id,
+    });
+  } catch (error) {
+    if (error instanceof z.ZodError) {
+      return res.status(400).json({ error: `Parametros invalidos: ${error.issues[0]?.message ?? "error de validacion"}` });
     }
 
     return next(error);

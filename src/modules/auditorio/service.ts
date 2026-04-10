@@ -1,4 +1,5 @@
 import { prisma } from "../../lib/prisma";
+import * as XLSX from "xlsx";
 
 export type AuditorioEstado = "Pendiente" | "Aprobada" | "Cancelada";
 
@@ -405,4 +406,71 @@ export const deleteReservaAuditorio = async (id: string) => {
   }
 
   return { reservaId: id };
+};
+
+export const buildReservasAuditorioHistoryExcel = async () => {
+  const reservas = await listReservasAuditorio();
+
+  const rows = reservas.flatMap((reserva) => {
+    if (reserva.horarios.length === 0) {
+      return [
+        {
+          "ID Reserva": reserva.id,
+          "Evento": reserva.nombreEvento,
+          "Organizador": reserva.organizador,
+          "Estado": reserva.estado,
+          "Fecha Creacion": reserva.fechaCreacion,
+          "Fecha Inicio Periodo": reserva.fechaInicioPeriodo,
+          "Fecha Fin Periodo": reserva.fechaFinPeriodo,
+          "Asistentes": reserva.numeroAsistentes,
+          "Pantalla": reserva.requierePantalla ? "Si" : "No",
+          "Sonido": reserva.requiereSonido ? "Si" : "No",
+          "Monitor": reserva.requiereMonitor ? "Si" : "No",
+          "Proyector": reserva.requiereProyector ? "Si" : "No",
+          "Filtro Agua": reserva.requiereFiltroAgua ? "Si" : "No",
+          "Fecha Bloque": "",
+          "Hora Inicio Bloque": "",
+          "Hora Fin Bloque": "",
+          "Observaciones": reserva.observaciones ?? "",
+        },
+      ];
+    }
+
+    return reserva.horarios.map((horario) => ({
+      "ID Reserva": reserva.id,
+      "Evento": reserva.nombreEvento,
+      "Organizador": reserva.organizador,
+      "Estado": reserva.estado,
+      "Fecha Creacion": reserva.fechaCreacion,
+      "Fecha Inicio Periodo": reserva.fechaInicioPeriodo,
+      "Fecha Fin Periodo": reserva.fechaFinPeriodo,
+      "Asistentes": reserva.numeroAsistentes,
+      "Pantalla": reserva.requierePantalla ? "Si" : "No",
+      "Sonido": reserva.requiereSonido ? "Si" : "No",
+      "Monitor": reserva.requiereMonitor ? "Si" : "No",
+      "Proyector": reserva.requiereProyector ? "Si" : "No",
+      "Filtro Agua": reserva.requiereFiltroAgua ? "Si" : "No",
+      "Fecha Bloque": horario.fechaEspecifica,
+      "Hora Inicio Bloque": horario.horaInicio,
+      "Hora Fin Bloque": horario.horaFin,
+      "Observaciones": reserva.observaciones ?? "",
+    }));
+  });
+
+  const worksheet = XLSX.utils.json_to_sheet(rows);
+  const workbook = XLSX.utils.book_new();
+  XLSX.utils.book_append_sheet(workbook, worksheet, "Historial Auditorio");
+
+  const buffer = XLSX.write(workbook, {
+    type: "buffer",
+    bookType: "xlsx",
+  }) as Buffer;
+
+  const now = new Date();
+  const stamp = `${now.getFullYear()}${String(now.getMonth() + 1).padStart(2, "0")}${String(now.getDate()).padStart(2, "0")}_${String(now.getHours()).padStart(2, "0")}${String(now.getMinutes()).padStart(2, "0")}`;
+
+  return {
+    buffer,
+    fileName: `historial_auditorio_${stamp}.xlsx`,
+  };
 };
