@@ -96,6 +96,8 @@ type StaffResumenContratoRawRow = {
 
 type SqlExecutor = Pick<typeof prisma, "$executeRaw">;
 
+let ensureStaffHorarioLaboralSchemaPromise: Promise<void> | null = null;
+
 const ensureStaffHorarioLaboralSchema = async (executor: SqlExecutor) => {
   await executor.$executeRaw`
     DO $$
@@ -189,6 +191,17 @@ const ensureStaffHorarioLaboralSchema = async (executor: SqlExecutor) => {
     CREATE INDEX IF NOT EXISTS idx_staff_pausas_tipo
     ON public.staff_pausas_programadas(tipo_pausa)
   `;
+};
+
+const ensureStaffHorarioLaboralSchemaReady = async () => {
+  if (!ensureStaffHorarioLaboralSchemaPromise) {
+    ensureStaffHorarioLaboralSchemaPromise = ensureStaffHorarioLaboralSchema(prisma).catch((error) => {
+      ensureStaffHorarioLaboralSchemaPromise = null;
+      throw error;
+    });
+  }
+
+  await ensureStaffHorarioLaboralSchemaPromise;
 };
 
 const toIsoDate = (value: Date) => value.toISOString().slice(0, 10);
@@ -528,7 +541,7 @@ const assertStaffExists = async (staffId: string) => {
 };
 
 export const listStaffJornadaSemanal = async (staffId: string) => {
-  await ensureStaffHorarioLaboralSchema(prisma);
+  await ensureStaffHorarioLaboralSchemaReady();
   await assertStaffExists(staffId);
 
   const rows = await prisma.$queryRaw<StaffJornadaRawRow[]>`
@@ -567,7 +580,7 @@ export const listStaffJornadaSemanal = async (staffId: string) => {
 };
 
 export const listAllStaffJornadasSemanales = async () => {
-  await ensureStaffHorarioLaboralSchema(prisma);
+  await ensureStaffHorarioLaboralSchemaReady();
 
   const rows = await prisma.$queryRaw<StaffJornadaRawRow[]>`
     SELECT
@@ -624,8 +637,9 @@ export const listAllStaffJornadasSemanales = async () => {
 };
 
 export const replaceStaffJornadaSemanal = async (staffId: string, jornadas: StaffJornadaInput[]) => {
+  await ensureStaffHorarioLaboralSchemaReady();
+
   return prisma.$transaction(async (tx) => {
-    await ensureStaffHorarioLaboralSchema(tx);
 
     const existing = await tx.$queryRaw<Array<{ id: string }>>`
       SELECT id::text AS id
@@ -663,11 +677,11 @@ export const replaceStaffJornadaSemanal = async (staffId: string, jornadas: Staf
     }
 
     return { staffId };
-  });
+  }, { timeout: 20000, maxWait: 10000 });
 };
 
 export const listStaffPausasProgramadas = async (staffId: string) => {
-  await ensureStaffHorarioLaboralSchema(prisma);
+  await ensureStaffHorarioLaboralSchemaReady();
   await assertStaffExists(staffId);
 
   const rows = await prisma.$queryRaw<StaffPausaRawRow[]>`
@@ -694,8 +708,9 @@ export const listStaffPausasProgramadas = async (staffId: string) => {
 };
 
 export const createStaffPausaProgramada = async (staffId: string, payload: StaffPausaInput) => {
+  await ensureStaffHorarioLaboralSchemaReady();
+
   return prisma.$transaction(async (tx) => {
-    await ensureStaffHorarioLaboralSchema(tx);
 
     const existing = await tx.$queryRaw<Array<{ id: string }>>`
       SELECT id::text AS id
@@ -746,12 +761,13 @@ export const createStaffPausaProgramada = async (staffId: string, payload: Staff
     }
 
     return { id };
-  });
+  }, { timeout: 20000, maxWait: 10000 });
 };
 
 export const updateStaffPausaProgramada = async (staffId: string, pausaId: string, payload: StaffPausaInput) => {
+  await ensureStaffHorarioLaboralSchemaReady();
+
   return prisma.$transaction(async (tx) => {
-    await ensureStaffHorarioLaboralSchema(tx);
 
     const existing = await tx.$queryRaw<Array<{ id: string }>>`
       SELECT id::text AS id
@@ -795,11 +811,11 @@ export const updateStaffPausaProgramada = async (staffId: string, pausaId: strin
     }
 
     return { id: updated[0].id };
-  });
+  }, { timeout: 20000, maxWait: 10000 });
 };
 
 export const deleteStaffPausaProgramada = async (staffId: string, pausaId: string) => {
-  await ensureStaffHorarioLaboralSchema(prisma);
+  await ensureStaffHorarioLaboralSchemaReady();
 
   const deleted = await prisma.$queryRaw<Array<{ id: string }>>`
     DELETE FROM public.staff_pausas_programadas
@@ -816,7 +832,7 @@ export const deleteStaffPausaProgramada = async (staffId: string, pausaId: strin
 };
 
 export const getStaffResumenContrato = async (staffId: string) => {
-  await ensureStaffHorarioLaboralSchema(prisma);
+  await ensureStaffHorarioLaboralSchemaReady();
   await assertStaffExists(staffId);
 
   const rows = await prisma.$queryRaw<StaffResumenContratoRawRow[]>`
@@ -842,7 +858,7 @@ export const getStaffResumenContrato = async (staffId: string) => {
 };
 
 export const upsertStaffResumenContrato = async (staffId: string, payload: StaffResumenContratoInput) => {
-  await ensureStaffHorarioLaboralSchema(prisma);
+  await ensureStaffHorarioLaboralSchemaReady();
 
   const updated = await prisma.$queryRaw<Array<{ staff_id: string }>>`
     INSERT INTO public.staff_resumen_contrato (

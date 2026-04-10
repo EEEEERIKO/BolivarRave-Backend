@@ -186,6 +186,21 @@ const handleKnownScheduleWriteError = (error: unknown, res: import("express").Re
     }
   }
 
+  if (messageLower.includes("conflicto de solape:")) {
+    const match = /conflicto de solape:\s*salon\s*([^,]+),\s*dia\s*([^,]+),\s*horario\s*([^\s]+)\s*con\s*evento\s*(.+)$/i.exec(message);
+    if (match) {
+      const salon = match[1]?.trim() ?? "salón";
+      const dia = match[2]?.trim() ?? "día";
+      const horario = match[3]?.trim() ?? "horario";
+      const clase = match[4]?.trim() ?? "otra clase";
+
+      res.status(409).json({
+        error: `Solapamiento detectado en ${salon} el ${dia}. La clase "${clase}" ocupa ${horario}.`,
+      });
+      return true;
+    }
+  }
+
   if (message.includes("HORARIO_DUPLICADO_EN_FORMULARIO")) {
     const parts = message.split("|");
     if (parts.length >= 5) {
