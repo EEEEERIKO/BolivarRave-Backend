@@ -6,9 +6,11 @@ import {
   createStaff,
   deleteStaffPausaProgramada,
   deleteStaff,
+  getNextStaffNumber,
   getStaffHorarioLaboral,
   getStaffResumenContrato,
   getStaffById,
+  listStaffSkills,
   listAllStaffJornadasSemanales,
   listStaffJornadaSemanal,
   listStaffPausasProgramadas,
@@ -41,8 +43,7 @@ const bloqueoClaseSchema = z.object({
   horaFin: z.string().regex(timeRegex, "Hora fin invalida (HH:mm)"),
 });
 
-const createUpdateStaffBodySchema = z.object({
-  numeroStaff: z.number().int().min(1).max(999999),
+const staffWriteBaseBodySchema = z.object({
   roleId: z.number().int().min(1).default(3),
   rol: z.string().trim().min(2).max(100),
   nombres: z.string().trim().min(2).max(150),
@@ -55,7 +56,17 @@ const createUpdateStaffBodySchema = z.object({
   conocimientoSonido: z.boolean().default(false),
   estado: z.enum(["Active", "Inactive"]).default("Active"),
   balanceHoras: z.number().min(-10000).max(10000).default(0),
+  password: z.string().min(8).max(128).optional(),
+  habilidadIds: z.array(z.string().uuid()).default([]),
   bloqueosClase: z.array(bloqueoClaseSchema).default([]),
+});
+
+const createStaffBodySchema = staffWriteBaseBodySchema.extend({
+  numeroStaff: z.number().int().min(1).max(999999).optional(),
+});
+
+const updateStaffBodySchema = staffWriteBaseBodySchema.extend({
+  numeroStaff: z.number().int().min(1).max(999999),
 });
 
 const patchEstadoBodySchema = z.object({
@@ -202,6 +213,16 @@ const handleKnownStaffWriteError = (error: unknown, res: import("express").Respo
     return true;
   }
 
+  if (message.includes("contrase") || message.includes("password") || message.includes("credencial")) {
+    res.status(400).json({ error: error.message });
+    return true;
+  }
+
+  if (message.includes("staff_habilidades") || message.includes("habilidad")) {
+    res.status(400).json({ error: "Alguna habilidad seleccionada no existe." });
+    return true;
+  }
+
   return false;
 };
 
@@ -253,8 +274,36 @@ staffRouter.get("/jornadas-semanales", async (_req, res, next) => {
   }
 });
 
+staffRouter.get("/next-number", async (_req, res, next) => {
+  try {
+    const numeroStaff = await getNextStaffNumber();
+    return res.json({ numeroStaff });
+  } catch (error) {
+    return next(error);
+  }
+});
+
+staffRouter.get("/skills", async (_req, res, next) => {
+  try {
+    const habilidades = await listStaffSkills();
+    return res.json({ habilidades });
+  } catch (error) {
+    return next(error);
+  }
+});
+
 staffRouter.get("/:id", async (req, res, next) => {
   try {
+    if (req.params.id === "next-number") {
+      const numeroStaff = await getNextStaffNumber();
+      return res.json({ numeroStaff });
+    }
+
+    if (req.params.id === "skills") {
+      const habilidades = await listStaffSkills();
+      return res.json({ habilidades });
+    }
+
     const { id } = idParamsSchema.parse(req.params);
     const staff = await getStaffById(id);
 
@@ -276,11 +325,10 @@ staffRouter.get("/:id", async (req, res, next) => {
 
 staffRouter.post("/", requireAdminKey, async (req, res, next) => {
   try {
-    const parsed = createUpdateStaffBodySchema.parse(req.body);
+    const parsed = createStaffBodySchema.parse(req.body);
     validateBloqueosNoOverlap(parsed.bloqueosClase);
 
     const created = await createStaff({
-      numeroStaff: parsed.numeroStaff,
       roleId: parsed.roleId,
       rol: parsed.rol,
       nombres: parsed.nombres,
@@ -293,7 +341,10 @@ staffRouter.post("/", requireAdminKey, async (req, res, next) => {
       conocimientoSonido: parsed.conocimientoSonido,
       estado: parsed.estado as StaffEstado,
       balanceHoras: parsed.balanceHoras,
+      habilidadIds: parsed.habilidadIds,
       bloqueosClase: parsed.bloqueosClase,
+      ...(parsed.numeroStaff !== undefined ? { numeroStaff: parsed.numeroStaff } : {}),
+      ...(parsed.password ? { password: parsed.password } : {}),
     });
 
     broadcastScheduleRefresh();
@@ -320,7 +371,7 @@ staffRouter.post("/", requireAdminKey, async (req, res, next) => {
 staffRouter.put("/:id", requireAdminKey, async (req, res, next) => {
   try {
     const { id } = idParamsSchema.parse(req.params);
-    const parsed = createUpdateStaffBodySchema.parse(req.body);
+    const parsed = updateStaffBodySchema.parse(req.body);
     validateBloqueosNoOverlap(parsed.bloqueosClase);
 
     const updated = await updateStaff({
@@ -338,7 +389,9 @@ staffRouter.put("/:id", requireAdminKey, async (req, res, next) => {
       conocimientoSonido: parsed.conocimientoSonido,
       estado: parsed.estado as StaffEstado,
       balanceHoras: parsed.balanceHoras,
+      habilidadIds: parsed.habilidadIds,
       bloqueosClase: parsed.bloqueosClase,
+      ...(parsed.password ? { password: parsed.password } : {}),
     });
 
     broadcastScheduleRefresh();

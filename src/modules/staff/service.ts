@@ -1,4 +1,6 @@
 import { prisma } from "../../lib/prisma";
+import { randomBytes, scrypt as scryptCallback } from "node:crypto";
+import { promisify } from "node:util";
 
 export type StaffEstado = "Active" | "Inactive";
 
@@ -28,7 +30,7 @@ export type StaffResumenContratoInput = {
 };
 
 export type CreateStaffInput = {
-  numeroStaff: number;
+  numeroStaff?: number;
   roleId: number;
   rol: string;
   nombres: string;
@@ -41,10 +43,13 @@ export type CreateStaffInput = {
   conocimientoSonido: boolean;
   estado: StaffEstado;
   balanceHoras: number;
+  password?: string;
+  habilidadIds: string[];
   bloqueosClase: StaffBloqueoClaseInput[];
 };
 
 export type UpdateStaffInput = CreateStaffInput & {
+  numeroStaff: number;
   id: string;
 };
 
@@ -68,6 +73,14 @@ type StaffRawRow = {
   bloqueo_dia_semana: string | null;
   bloqueo_hora_inicio: string | null;
   bloqueo_hora_fin: string | null;
+  habilidad_id: string | null;
+  habilidad_nombre: string | null;
+  tiene_credencial: boolean;
+};
+
+type StaffSkillRawRow = {
+  id: string;
+  nombre: string;
 };
 
 type StaffJornadaRawRow = {
@@ -97,6 +110,9 @@ type StaffResumenContratoRawRow = {
 type SqlExecutor = Pick<typeof prisma, "$executeRaw">;
 
 let ensureStaffHorarioLaboralSchemaPromise: Promise<void> | null = null;
+let ensureStaffSecuritySchemaPromise: Promise<void> | null = null;
+const scryptAsync = promisify(scryptCallback);
+const CREDENTIAL_REQUIRED_ROLE_IDS = new Set([1, 2]);
 
 const ensureStaffHorarioLaboralSchema = async (executor: SqlExecutor) => {
   await executor.$executeRaw`
@@ -193,6 +209,49 @@ const ensureStaffHorarioLaboralSchema = async (executor: SqlExecutor) => {
   `;
 };
 
+const ensureStaffSecuritySchema = async (executor: SqlExecutor) => {
+  await executor.$executeRaw`
+    CREATE TABLE IF NOT EXISTS public.staff_credentials (
+      staff_id uuid PRIMARY KEY REFERENCES public.staff(id) ON DELETE CASCADE,
+      password_hash text NOT NULL,
+      password_algo varchar(32) NOT NULL DEFAULT 'scrypt',
+      created_at timestamptz NOT NULL DEFAULT now(),
+      password_updated_at timestamptz NOT NULL DEFAULT now()
+    )
+  `;
+
+  await executor.$executeRaw`
+    CREATE INDEX IF NOT EXISTS idx_staff_credentials_updated_at
+    ON public.staff_credentials(password_updated_at)
+  `;
+
+  await executor.$executeRaw`
+    CREATE TABLE IF NOT EXISTS public.habilidades (
+      id uuid PRIMARY KEY DEFAULT gen_random_uuid(),
+      nombre varchar(120) NOT NULL UNIQUE
+    )
+  `;
+
+  await executor.$executeRaw`
+    CREATE TABLE IF NOT EXISTS public.staff_habilidades (
+      id uuid PRIMARY KEY DEFAULT gen_random_uuid(),
+      staff_id uuid NOT NULL REFERENCES public.staff(id) ON DELETE CASCADE,
+      habilidad_id uuid NOT NULL REFERENCES public.habilidades(id) ON DELETE RESTRICT,
+      CONSTRAINT staff_habilidades_staff_habilidad_uq UNIQUE (staff_id, habilidad_id)
+    )
+  `;
+
+  await executor.$executeRaw`
+    CREATE INDEX IF NOT EXISTS idx_staff_habilidades_staff_id
+    ON public.staff_habilidades(staff_id)
+  `;
+
+  await executor.$executeRaw`
+    CREATE INDEX IF NOT EXISTS idx_staff_habilidades_habilidad_id
+    ON public.staff_habilidades(habilidad_id)
+  `;
+};
+
 const ensureStaffHorarioLaboralSchemaReady = async () => {
   if (!ensureStaffHorarioLaboralSchemaPromise) {
     ensureStaffHorarioLaboralSchemaPromise = ensureStaffHorarioLaboralSchema(prisma).catch((error) => {
@@ -204,7 +263,116 @@ const ensureStaffHorarioLaboralSchemaReady = async () => {
   await ensureStaffHorarioLaboralSchemaPromise;
 };
 
+const ensureStaffSecuritySchemaReady = async () => {
+  if (!ensureStaffSecuritySchemaPromise) {
+    ensureStaffSecuritySchemaPromise = ensureStaffSecuritySchema(prisma).catch((error) => {
+      ensureStaffSecuritySchemaPromise = null;
+      throw error;
+    });
+  }
+
+  await ensureStaffSecuritySchemaPromise;
+};
+
 const toIsoDate = (value: Date) => value.toISOString().slice(0, 10);
+
+const hashPassword = async (password: string) => {
+  const salt = randomBytes(16);
+  const derivedKey = (await scryptAsync(password, salt, 64)) as Buffer;
+
+  return `scrypt$N=16384,r=8,p=1$${salt.toString("hex")}$${derivedKey.toString("hex")}`;
+};
+
+const getNextStaffNumberTx = async (tx: Pick<typeof prisma, "$queryRaw">) => {
+  const rows = await tx.$queryRaw<Array<{ numero_staff: number }>>`
+    WITH ordered AS (
+      SELECT
+        numero_staff,
+        LEAD(numero_staff) OVER (ORDER BY numero_staff) AS next_num
+      FROM public.staff
+    )
+    SELECT COALESCE(
+      (
+        SELECT 1
+        WHERE NOT EXISTS (
+          SELECT 1 FROM public.staff WHERE numero_staff = 1
+        )
+      ),
+      (
+        SELECT numero_staff + 1
+        FROM ordered
+        WHERE next_num IS NOT NULL
+          AND next_num > numero_staff + 1
+        ORDER BY numero_staff
+        LIMIT 1
+      ),
+      (
+        SELECT COALESCE(MAX(numero_staff), 0) + 1 FROM public.staff
+      )
+    )::int AS numero_staff
+  `;
+
+  return rows[0]?.numero_staff ?? 1;
+};
+
+const syncStaffSkills = async (
+  tx: Pick<typeof prisma, "$executeRaw">,
+  staffId: string,
+  habilidadIds: string[],
+) => {
+  await tx.$executeRaw`
+    DELETE FROM public.staff_habilidades
+    WHERE staff_id = ${staffId}::uuid
+  `;
+
+  const uniqueIds = Array.from(new Set(habilidadIds));
+  for (const habilidadId of uniqueIds) {
+    await tx.$executeRaw`
+      INSERT INTO public.staff_habilidades (staff_id, habilidad_id)
+      VALUES (${staffId}::uuid, ${habilidadId}::uuid)
+    `;
+  }
+};
+
+const upsertStaffCredential = async (
+  tx: Pick<typeof prisma, "$executeRaw">,
+  staffId: string,
+  password: string,
+) => {
+  const passwordHash = await hashPassword(password);
+
+  await tx.$executeRaw`
+    INSERT INTO public.staff_credentials (staff_id, password_hash, password_algo)
+    VALUES (${staffId}::uuid, ${passwordHash}, 'scrypt')
+    ON CONFLICT (staff_id)
+    DO UPDATE SET
+      password_hash = EXCLUDED.password_hash,
+      password_algo = EXCLUDED.password_algo,
+      password_updated_at = now()
+  `;
+};
+
+const deleteStaffCredential = async (
+  tx: Pick<typeof prisma, "$executeRaw">,
+  staffId: string,
+) => {
+  await tx.$executeRaw`
+    DELETE FROM public.staff_credentials
+    WHERE staff_id = ${staffId}::uuid
+  `;
+};
+
+const hasStaffCredentialTx = async (tx: Pick<typeof prisma, "$queryRaw">, staffId: string) => {
+  const rows = await tx.$queryRaw<Array<{ has_credential: boolean }>>`
+    SELECT EXISTS (
+      SELECT 1
+      FROM public.staff_credentials c
+      WHERE c.staff_id = ${staffId}::uuid
+    ) AS has_credential
+  `;
+
+  return Boolean(rows[0]?.has_credential);
+};
 
 const mapStaffRows = (rows: StaffRawRow[]) => {
   const byId = new Map<
@@ -225,12 +393,19 @@ const mapStaffRows = (rows: StaffRawRow[]) => {
       estado: StaffEstado;
       balanceHoras: number;
       fechaCreacion: string;
+      tieneCredencial: boolean;
+      habilidades: Array<{
+        id: string;
+        nombre: string;
+      }>;
       bloqueosClase: Array<{
         id: string;
         diaSemana: string;
         horaInicio: string;
         horaFin: string;
       }>;
+      _bloqueoIds: Set<string>;
+      _habilidadIds: Set<string>;
     }
   >();
 
@@ -254,6 +429,11 @@ const mapStaffRows = (rows: StaffRawRow[]) => {
         estado: row.estado,
         balanceHoras: row.balance_horas,
         fechaCreacion: row.fecha_creacion,
+        tieneCredencial: row.tiene_credencial,
+        habilidades:
+          row.habilidad_id && row.habilidad_nombre
+            ? [{ id: row.habilidad_id, nombre: row.habilidad_nombre }]
+            : [],
         bloqueosClase:
           row.bloqueo_id && row.bloqueo_dia_semana && row.bloqueo_hora_inicio && row.bloqueo_hora_fin
             ? [
@@ -265,11 +445,20 @@ const mapStaffRows = (rows: StaffRawRow[]) => {
                 },
               ]
             : [],
+        _bloqueoIds: row.bloqueo_id ? new Set([row.bloqueo_id]) : new Set<string>(),
+        _habilidadIds: row.habilidad_id ? new Set([row.habilidad_id]) : new Set<string>(),
       });
       continue;
     }
 
-    if (row.bloqueo_id && row.bloqueo_dia_semana && row.bloqueo_hora_inicio && row.bloqueo_hora_fin) {
+    if (
+      row.bloqueo_id &&
+      row.bloqueo_dia_semana &&
+      row.bloqueo_hora_inicio &&
+      row.bloqueo_hora_fin &&
+      !current._bloqueoIds.has(row.bloqueo_id)
+    ) {
+      current._bloqueoIds.add(row.bloqueo_id);
       current.bloqueosClase.push({
         id: row.bloqueo_id,
         diaSemana: row.bloqueo_dia_semana,
@@ -277,12 +466,44 @@ const mapStaffRows = (rows: StaffRawRow[]) => {
         horaFin: row.bloqueo_hora_fin,
       });
     }
+
+    if (row.habilidad_id && row.habilidad_nombre && !current._habilidadIds.has(row.habilidad_id)) {
+      current._habilidadIds.add(row.habilidad_id);
+      current.habilidades.push({
+        id: row.habilidad_id,
+        nombre: row.habilidad_nombre,
+      });
+    }
   }
 
-  return Array.from(byId.values());
+  return Array.from(byId.values()).map((item) => {
+    const { _bloqueoIds: _ignoreBloqueos, _habilidadIds: _ignoreHabilidades, ...staff } = item;
+    return staff;
+  });
+};
+
+export const listStaffSkills = async () => {
+  await ensureStaffSecuritySchemaReady();
+
+  const rows = await prisma.$queryRaw<StaffSkillRawRow[]>`
+    SELECT
+      h.id::text AS id,
+      h.nombre
+    FROM public.habilidades h
+    ORDER BY h.nombre ASC
+  `;
+
+  return rows;
+};
+
+export const getNextStaffNumber = async () => {
+  await ensureStaffSecuritySchemaReady();
+  return getNextStaffNumberTx(prisma);
 };
 
 export const listStaff = async () => {
+  await ensureStaffSecuritySchemaReady();
+
   const rows = await prisma.$queryRaw<StaffRawRow[]>`
     SELECT
       s.id::text AS id,
@@ -310,8 +531,14 @@ export const listStaff = async () => {
         WHEN b.hora_fin IS NULL THEN NULL
         ELSE TO_CHAR(b.hora_fin, 'HH24:MI')
       END AS bloqueo_hora_fin
+      , h.id::text AS habilidad_id
+      , h.nombre AS habilidad_nombre
+      , (c.staff_id IS NOT NULL) AS tiene_credencial
     FROM public.staff s
     LEFT JOIN public.staff_bloqueos_clase b ON b.staff_id = s.id
+    LEFT JOIN public.staff_habilidades sh ON sh.staff_id = s.id
+    LEFT JOIN public.habilidades h ON h.id = sh.habilidad_id
+    LEFT JOIN public.staff_credentials c ON c.staff_id = s.id
     ORDER BY s.fecha_creacion DESC, b.dia_semana ASC NULLS LAST, b.hora_inicio ASC NULLS LAST
   `;
 
@@ -319,6 +546,8 @@ export const listStaff = async () => {
 };
 
 export const getStaffById = async (id: string) => {
+  await ensureStaffSecuritySchemaReady();
+
   const rows = await prisma.$queryRaw<StaffRawRow[]>`
     SELECT
       s.id::text AS id,
@@ -346,8 +575,14 @@ export const getStaffById = async (id: string) => {
         WHEN b.hora_fin IS NULL THEN NULL
         ELSE TO_CHAR(b.hora_fin, 'HH24:MI')
       END AS bloqueo_hora_fin
+      , h.id::text AS habilidad_id
+      , h.nombre AS habilidad_nombre
+      , (c.staff_id IS NOT NULL) AS tiene_credencial
     FROM public.staff s
     LEFT JOIN public.staff_bloqueos_clase b ON b.staff_id = s.id
+    LEFT JOIN public.staff_habilidades sh ON sh.staff_id = s.id
+    LEFT JOIN public.habilidades h ON h.id = sh.habilidad_id
+    LEFT JOIN public.staff_credentials c ON c.staff_id = s.id
     WHERE s.id = ${id}::uuid
     ORDER BY b.dia_semana ASC NULLS LAST, b.hora_inicio ASC NULLS LAST
   `;
@@ -357,7 +592,15 @@ export const getStaffById = async (id: string) => {
 };
 
 export const createStaff = async (payload: CreateStaffInput) => {
+  await ensureStaffSecuritySchemaReady();
+
   return prisma.$transaction(async (tx) => {
+    const numeroStaff = payload.numeroStaff ?? (await getNextStaffNumberTx(tx));
+
+    if (CREDENTIAL_REQUIRED_ROLE_IDS.has(payload.roleId) && !payload.password) {
+      throw new Error("Se requiere una contraseña para Administrador o Monitor");
+    }
+
     const created = await tx.$queryRaw<Array<{ id: string }>>`
       INSERT INTO public.staff (
         numero_staff,
@@ -375,7 +618,7 @@ export const createStaff = async (payload: CreateStaffInput) => {
         balance_horas
       )
       VALUES (
-        ${payload.numeroStaff},
+        ${numeroStaff},
         ${payload.roleId},
         ${payload.rol},
         ${payload.nombres},
@@ -414,12 +657,27 @@ export const createStaff = async (payload: CreateStaffInput) => {
       `;
     }
 
+    await syncStaffSkills(tx, staffId, payload.habilidadIds);
+
+    if (payload.password) {
+      await upsertStaffCredential(tx, staffId, payload.password);
+    }
+
     return { staffId };
-  });
+  }, { timeout: 20000, maxWait: 10000 });
 };
 
 export const updateStaff = async (payload: UpdateStaffInput) => {
+  await ensureStaffSecuritySchemaReady();
+
   return prisma.$transaction(async (tx) => {
+    if (CREDENTIAL_REQUIRED_ROLE_IDS.has(payload.roleId) && !payload.password) {
+      const hasCredential = await hasStaffCredentialTx(tx, payload.id);
+      if (!hasCredential) {
+        throw new Error("Se requiere una contraseña para Administrador o Monitor");
+      }
+    }
+
     const updated = await tx.$queryRaw<Array<{ id: string }>>`
       UPDATE public.staff
       SET
@@ -466,8 +724,18 @@ export const updateStaff = async (payload: UpdateStaffInput) => {
       `;
     }
 
+    await syncStaffSkills(tx, payload.id, payload.habilidadIds);
+
+    if (CREDENTIAL_REQUIRED_ROLE_IDS.has(payload.roleId) && payload.password) {
+      await upsertStaffCredential(tx, payload.id, payload.password);
+    }
+
+    if (!CREDENTIAL_REQUIRED_ROLE_IDS.has(payload.roleId)) {
+      await deleteStaffCredential(tx, payload.id);
+    }
+
     return { staffId: payload.id };
-  });
+  }, { timeout: 20000, maxWait: 10000 });
 };
 
 export const updateStaffEstado = async (id: string, estado: StaffEstado) => {

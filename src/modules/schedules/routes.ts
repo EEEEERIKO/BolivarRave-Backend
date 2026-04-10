@@ -565,8 +565,15 @@ schedulesRouter.get("/rooms-info", async (_req, res, next) => {
         e.codigo_materia,
         e.actividad
       FROM public.salones s
-      LEFT JOIN public.horarios_evento h ON h.salon_id = s.id
-      LEFT JOIN public.eventos e ON e.id = h.evento_id AND e.fecha_fin >= ${today}::date
+      LEFT JOIN public.horarios_evento h
+        ON h.salon_id = s.id
+        AND EXISTS (
+          SELECT 1
+          FROM public.eventos e2
+          WHERE e2.id = h.evento_id
+            AND ${today}::date BETWEEN e2.fecha_inicio AND e2.fecha_fin
+        )
+      LEFT JOIN public.eventos e ON e.id = h.evento_id
       ORDER BY
         s.piso DESC NULLS LAST,
         s.nombre_bloque ASC,
