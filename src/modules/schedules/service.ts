@@ -192,6 +192,51 @@ const ensureOverlapValidationFunction = async () => {
       date
     ) set search_path = public, pg_temp;
   `);
+
+  await prisma.$executeRawUnsafe(`
+    create or replace function public.trg_horarios_evento_no_solape()
+    returns trigger
+    language plpgsql
+    as $$
+    declare
+      v_evento_inicio date;
+      v_evento_fin date;
+      v_target_date date;
+    begin
+      select e.fecha_inicio, e.fecha_fin
+        into v_evento_inicio, v_evento_fin
+      from public.eventos e
+      where e.id = new.evento_id;
+
+      v_target_date := null;
+      if v_evento_inicio is not null and v_evento_fin is not null and v_evento_inicio = v_evento_fin then
+        v_target_date := v_evento_inicio;
+      end if;
+
+      perform public.verificar_solape_horario(
+        new.evento_id,
+        new.salon_id,
+        new.dia_semana,
+        new.hora_inicio,
+        new.hora_fin,
+        new.id,
+        v_target_date
+      );
+
+      return new;
+    end;
+    $$;
+
+    alter function public.trg_horarios_evento_no_solape()
+      set search_path = public, pg_temp;
+
+    drop trigger if exists trg_horarios_evento_no_solape on public.horarios_evento;
+
+    create trigger trg_horarios_evento_no_solape
+      before insert or update on public.horarios_evento
+      for each row
+      execute function public.trg_horarios_evento_no_solape();
+  `);
 };
 
 const ensureOverlapValidationReady = async () => {
@@ -468,6 +513,13 @@ const toIsoDate = (value: Date) => {
   const month = String(value.getMonth() + 1).padStart(2, "0");
   const day = String(value.getDate()).padStart(2, "0");
   return `${year}-${month}-${day}`;
+};
+
+const weekdayFromIsoDate = (isoDate: string) => {
+  const [year, month, day] = isoDate.split("-").map(Number);
+  const date = new Date(year ?? 0, (month ?? 1) - 1, day ?? 1);
+  const names = ["Domingo", "Lunes", "Martes", "Miercoles", "Jueves", "Viernes", "Sabado"] as const;
+  return names[date.getDay()] ?? "Lunes";
 };
 
 const reservationTypeToId = (type: ReservationTypeKey) => {
@@ -766,8 +818,15 @@ export const createScheduleEvent = async (payload: CreateScheduleEventInput) => 
     `;
     salones.forEach((salon) => roomIdByName.set(salon.nombre, salon.id));
 
+    const normalizedStartDateIso = toIsoDate(payload.startDate);
+    const normalizedEndDateIso = toIsoDate(payload.endDate);
+    const forcedMomentaneaDay =
+      payload.reservationType === "momentanea" && normalizedStartDateIso === normalizedEndDateIso
+        ? weekdayFromIsoDate(normalizedStartDateIso)
+        : null;
+
     payload.slots.forEach((slot) => {
-      const canonicalDay = canonicalDayName(slot.day);
+      const canonicalDay = forcedMomentaneaDay ?? canonicalDayName(slot.day);
       if (!canonicalDay) {
         throw new Error(`Dia invalido en creacion: '${slot.day}'`);
       }
@@ -786,9 +845,6 @@ export const createScheduleEvent = async (payload: CreateScheduleEventInput) => 
       seenSlots.add(slotKey);
     }
 
-    const normalizedStartDateIso = toIsoDate(payload.startDate);
-    const normalizedEndDateIso = toIsoDate(payload.endDate);
-
     if (normalizedStartDateIso > normalizedEndDateIso) {
       throw new Error(
         `FECHAS_INVALIDAS|${normalizedStartDateIso}|${normalizedEndDateIso}|${payload.subject}`
@@ -804,11 +860,15 @@ export const createScheduleEvent = async (payload: CreateScheduleEventInput) => 
     const materialCode = isIglesiaReservation ? null : payload.code;
     const activity = isIglesiaReservation ? payload.subject : null;
 
+    const targetDateIso = normalizedStartDateIso === normalizedEndDateIso ? normalizedStartDateIso : null;
+
     for (const slot of payload.slots) {
       const resolvedRoomName = canonicalRoomName(slot.room);
       if (!resolvedRoomName) {
         throw new Error(`El salon '${slot.room}' no pertenece al catalogo oficial`);
       }
+
+      const resolvedSalonId = await resolveSalonId(tx, roomIdByName, resolvedRoomName);
 
       const conflict = await tx.$queryRaw<
         Array<{
@@ -822,18 +882,35 @@ export const createScheduleEvent = async (payload: CreateScheduleEventInput) => 
       >`
         SELECT
           e.nombre_principal AS subject,
-          s.nombre_bloque AS room,
-          TO_CHAR(h.hora_inicio, 'HH24:MI:SS') AS start_time,
-          TO_CHAR(h.hora_fin, 'HH24:MI:SS') AS end_time,
+          COALESCE(sx.nombre_bloque, sb.nombre_bloque) AS room,
+          TO_CHAR(COALESCE(x.hora_inicio, h.hora_inicio), 'HH24:MI:SS') AS start_time,
+          TO_CHAR(COALESCE(x.hora_fin, h.hora_fin), 'HH24:MI:SS') AS end_time,
           TO_CHAR(e.fecha_inicio, 'YYYY-MM-DD') AS existing_start_date,
           TO_CHAR(e.fecha_fin, 'YYYY-MM-DD') AS existing_end_date
         FROM public.horarios_evento h
         INNER JOIN public.eventos e ON e.id = h.evento_id
-        INNER JOIN public.salones s ON s.id = h.salon_id
-        WHERE h.salon_id = ${await resolveSalonId(tx, roomIdByName, resolvedRoomName)}::uuid
-          AND h.dia_semana = ${slot.day}::public.dia_semana_enum
-          AND (${normalizedStartDateIso}::date <= e.fecha_fin AND ${normalizedEndDateIso}::date >= e.fecha_inicio)
-          AND (${slot.startTime}::time < h.hora_fin AND h.hora_inicio < ${slot.endTime}::time)
+        INNER JOIN public.salones sb ON sb.id = h.salon_id
+        LEFT JOIN public.horarios_evento_excepciones x
+          ON x.horario_id = h.id
+          AND x.fecha = ${targetDateIso}::date
+        LEFT JOIN public.salones sx ON sx.id = x.salon_id
+        WHERE COALESCE(x.salon_id, h.salon_id) = ${resolvedSalonId}::uuid
+          AND COALESCE(x.dia_semana, h.dia_semana) = ${slot.day}::public.dia_semana_enum
+          AND (${slot.startTime}::time < COALESCE(x.hora_fin, h.hora_fin)
+            AND COALESCE(x.hora_inicio, h.hora_inicio) < ${slot.endTime}::time)
+          AND (
+            ${targetDateIso}::date IS NULL OR
+            (
+              ${targetDateIso}::date >= ${normalizedStartDateIso}::date
+              AND ${targetDateIso}::date <= ${normalizedEndDateIso}::date
+              AND ${targetDateIso}::date >= e.fecha_inicio
+              AND ${targetDateIso}::date <= e.fecha_fin
+            )
+          )
+          AND (
+            ${targetDateIso}::date IS NOT NULL OR
+            (${normalizedStartDateIso}::date <= e.fecha_fin AND ${normalizedEndDateIso}::date >= e.fecha_inicio)
+          )
         LIMIT 1
       `;
 
@@ -1055,25 +1132,17 @@ export const updateScheduleEventSlot = async (payload: UpdateScheduleEventSlotIn
     const activity = isIglesiaReservation ? payload.subject : null;
 
     // Validate overlap with the specific target date if provided
-    await tx.$executeRawUnsafe(`
+    await tx.$executeRaw`
       SELECT public.verificar_solape_horario(
-        $1::uuid,
-        $2::uuid,
-        $3::public.dia_semana_enum,
-        $4::time,
-        $5::time,
-        $6::uuid,
-        $7::date
+        ${payload.eventId}::uuid,
+        ${salonId}::uuid,
+        ${canonicalDay}::public.dia_semana_enum,
+        ${payload.startTime}::time,
+        ${payload.endTime}::time,
+        ${payload.slotId}::uuid,
+        ${payload.targetDate ? toIsoDate(payload.targetDate) : null}::date
       )
-    `, [
-      payload.eventId,
-      salonId,
-      canonicalDay,
-      payload.startTime,
-      payload.endTime,
-      payload.slotId,
-      payload.targetDate ? toIsoDate(payload.targetDate) : null
-    ]);
+    `;
 
     const updatedEvent = await tx.$queryRaw<Array<{ id: string }>>`
       UPDATE public.eventos
