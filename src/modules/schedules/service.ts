@@ -1027,7 +1027,9 @@ export const updateScheduleEventSlot = async (payload: UpdateScheduleEventSlotIn
       throw new Error(`Dia invalido en modificacion: '${payload.day}'`);
     }
 
-    const updateScope = payload.updateScope ?? "always";
+    // Safety guard: if targetDate is present, this is a single-date update.
+    // This prevents accidental full-series updates when the client scope flag is stale.
+    const updateScope = payload.targetDate ? "week" : payload.updateScope ?? "always";
 
     const roomIdByName = new Map<string, string>();
 
@@ -1057,6 +1059,18 @@ export const updateScheduleEventSlot = async (payload: UpdateScheduleEventSlotIn
     const salonId = await resolveSalonId(tx, roomIdByName, resolvedRoomName);
 
     if (updateScope === "week") {
+      if (process.env.NODE_ENV !== "production") {
+        console.log("[Schedules][week-update] incoming payload", {
+          eventId: payload.eventId,
+          slotId: payload.slotId,
+          targetDate: payload.targetDate ? toIsoDate(payload.targetDate) : null,
+          day: payload.day,
+          room: payload.room,
+          startTime: payload.startTime,
+          endTime: payload.endTime,
+        });
+      }
+
       await ensureSlotExceptionsTable();
 
       const slotOwnership = await tx.$queryRaw<Array<{ id: string }>>`
@@ -1152,6 +1166,38 @@ export const updateScheduleEventSlot = async (payload: UpdateScheduleEventSlotIn
           hora_fin = EXCLUDED.hora_fin,
           updated_at = NOW()
       `;
+
+      if (process.env.NODE_ENV !== "production") {
+        const persistedOverride = await tx.$queryRaw<
+          Array<{
+            date: string;
+            day: string;
+            room: string;
+            start: string;
+            end: string;
+          }>
+        >`
+          SELECT
+            TO_CHAR(x.fecha, 'YYYY-MM-DD') AS date,
+            x.dia_semana::text AS day,
+            s.nombre_bloque AS room,
+            TO_CHAR(x.hora_inicio, 'HH24:MI') AS start,
+            TO_CHAR(x.hora_fin, 'HH24:MI') AS "end"
+          FROM public.horarios_evento_excepciones x
+          INNER JOIN public.salones s ON s.id = x.salon_id
+          WHERE x.horario_id = ${payload.slotId}::uuid
+            AND x.fecha = ${targetDateIso}::date
+          LIMIT 1
+        `;
+
+        console.log("[Schedules][week-update] persisted override", {
+          eventId: payload.eventId,
+          slotId: payload.slotId,
+          targetDate: targetDateIso,
+          found: Boolean(persistedOverride[0]),
+          override: persistedOverride[0] ?? null,
+        });
+      }
 
       return;
     }
