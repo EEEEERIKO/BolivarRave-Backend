@@ -2,6 +2,7 @@ import { Router } from "express";
 import { z } from "zod";
 import {
   assignTaskToStaff,
+  createTaskSpace,
   createHabilidad,
   createTaskCatalog,
   createTaskInstance,
@@ -10,6 +11,7 @@ import {
   ensureTasksSchema,
   linkStaffHabilidad,
   listTaskCatalog,
+  listTaskSpaces,
   listTaskInstances,
   listHabilidades,
   listStaffHabilidades,
@@ -65,6 +67,7 @@ const createCatalogSchema = z.object({
   tareaFinalizacion: z.string().trim().max(200).nullable().optional(),
   fechaFinalizacion: z.string().regex(/^\d{4}-\d{2}-\d{2}$/).nullable().optional(),
   horaFinalizacion: z.string().regex(/^\d{2}:\d{2}$/).nullable().optional(),
+  staffAsignadosIds: z.array(z.string().uuid()).max(100).default([]),
   tiempoEstimadoMin: z.number().int().min(1).max(24 * 60),
 }).superRefine((value, ctx) => {
   if (value.tipo === "Recurrente" && value.programacionRecurrente === "programada") {
@@ -102,6 +105,10 @@ const createHabilidadSchema = z.object({
 });
 
 const updateHabilidadSchema = z.object({
+  nombre: z.string().trim().min(2).max(120),
+});
+
+const createTaskSpaceSchema = z.object({
   nombre: z.string().trim().min(2).max(120),
 });
 
@@ -166,6 +173,33 @@ tasksRouter.get("/skills", async (_req, res, next) => {
     const skills = await listHabilidades();
     return res.json({ skills });
   } catch (error) {
+    return next(error);
+  }
+});
+
+tasksRouter.get("/spaces", async (_req, res, next) => {
+  try {
+    const spaces = await listTaskSpaces();
+    return res.json({ spaces });
+  } catch (error) {
+    return next(error);
+  }
+});
+
+tasksRouter.post("/spaces", requireAdminKey, async (req, res, next) => {
+  try {
+    const parsed = createTaskSpaceSchema.parse(req.body);
+    const created = await createTaskSpace({ nombre: parsed.nombre });
+
+    return res.status(201).json({
+      message: "Espacio creado correctamente",
+      id: created.id,
+    });
+  } catch (error) {
+    if (error instanceof z.ZodError) {
+      return res.status(400).json({ error: `Payload invalido: ${error.issues[0]?.message ?? "error de validacion"}` });
+    }
+
     return next(error);
   }
 });
@@ -248,6 +282,7 @@ tasksRouter.post("/catalog", requireAdminKey, async (req, res, next) => {
       tareaFinalizacion: parsed.requiereFinalizacion ? (parsed.tareaFinalizacion ?? null) : null,
       fechaFinalizacion: parsed.requiereFinalizacion ? (parsed.fechaFinalizacion ?? null) : null,
       horaFinalizacion: parsed.requiereFinalizacion ? (parsed.horaFinalizacion ?? null) : null,
+      staffAsignadosIds: Array.from(new Set(parsed.staffAsignadosIds)),
       tiempoEstimadoMin: parsed.tiempoEstimadoMin,
     });
 
@@ -289,6 +324,7 @@ tasksRouter.put("/catalog/:id", requireAdminKey, async (req, res, next) => {
       tareaFinalizacion: parsed.requiereFinalizacion ? (parsed.tareaFinalizacion ?? null) : null,
       fechaFinalizacion: parsed.requiereFinalizacion ? (parsed.fechaFinalizacion ?? null) : null,
       horaFinalizacion: parsed.requiereFinalizacion ? (parsed.horaFinalizacion ?? null) : null,
+      staffAsignadosIds: Array.from(new Set(parsed.staffAsignadosIds)),
       tiempoEstimadoMin: parsed.tiempoEstimadoMin,
     });
 

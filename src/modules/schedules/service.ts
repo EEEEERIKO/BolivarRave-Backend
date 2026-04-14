@@ -641,20 +641,18 @@ export const replaceAllSchedulesFromRows = async (
   const importId = randomUUID();
   const importedAt = new Date();
 
+  console.groupCollapsed("[Schedules Import] replaceAllSchedulesFromRows");
+  console.log("sourceFile:", sourceFile);
+  console.log("rows:", rows.length);
+  console.log("grouped classes:", classes.length);
+  console.log("meta:", meta ?? null);
+  console.groupEnd();
+
   await ensureImportsHistoryTable();
+  await ensureOverlapValidationReady();
 
   return prisma.$transaction(async (tx) => {
     await ensureOfficialRoomCatalog(tx);
-
-    await tx.$executeRawUnsafe(`TRUNCATE TABLE public.horarios_evento, public.eventos CASCADE`);
-
-    // Elimina salones no oficiales para evitar duplicados heredados de imports antiguos.
-    await tx.$executeRawUnsafe(`
-      DELETE FROM public.salones
-      WHERE nombre_bloque <> ALL(ARRAY[
-        ${roomDisplayOrder.map((name) => `'${name.replace(/'/g, "''")}'`).join(",")}
-      ]::text[])
-    `);
 
     const facultyIdByName = new Map<string, string>();
     const existingFacultades = await tx.$queryRaw<Array<{ id: string; nombre: string }>>`
@@ -675,10 +673,37 @@ export const replaceAllSchedulesFromRows = async (
     let importedClasses = 0;
     let importedSlots = 0;
 
+    const existingNormalEventsCount = await tx.$queryRaw<Array<{ count: number }>>`
+      SELECT COUNT(*)::int AS count
+      FROM public.eventos
+      WHERE tipo_reserva_id = ${RESERVA_SEMESTRE_ID}
+    `;
+
+    const replacedEvents = existingNormalEventsCount[0]?.count ?? 0;
+
+    // Excel import only synchronizes academic classes (normal reservation type).
+    // Keep momentary/church reservations untouched.
+    await tx.$executeRaw`
+      DELETE FROM public.horarios_evento h
+      USING public.eventos e
+      WHERE h.evento_id = e.id
+        AND e.tipo_reserva_id = ${RESERVA_SEMESTRE_ID}
+    `;
+
+    await tx.$executeRaw`
+      DELETE FROM public.eventos
+      WHERE tipo_reserva_id = ${RESERVA_SEMESTRE_ID}
+    `;
+
     for (const cls of classes) {
       cls.slots.forEach((slot) => {
         const canonicalDay = canonicalDayName(slot.day);
         if (!canonicalDay) {
+          console.error("[Schedules Import] Invalid day", {
+            sourceFile,
+            classKey: `${cls.faculty} | ${cls.code} | ${cls.subject}`,
+            slot,
+          });
           throw new Error(`Dia invalido en importacion: '${slot.day}'`);
         }
 
@@ -689,12 +714,25 @@ export const replaceAllSchedulesFromRows = async (
         .map((slot) => ({ slot, canonicalRoom: canonicalRoomName(slot.room) }))
         .filter((entry) => entry.canonicalRoom !== null);
 
+      const discardedSlots = cls.slots.length - validSlots.length;
+      if (discardedSlots > 0) {
+        console.warn("[Schedules Import] Discarded non-official rooms", {
+          sourceFile,
+          classKey: `${cls.faculty} | ${cls.code} | ${cls.subject}`,
+          discardedSlots,
+          originalRooms: cls.slots.map((slot) => slot.room),
+        });
+      }
+
       skippedSlots += cls.slots.length - validSlots.length;
 
       if (validSlots.length === 0) {
         skippedClasses += 1;
         continue;
       }
+
+      const classStartIso = toIsoDate(cls.startDate);
+      const classEndIso = toIsoDate(cls.endDate);
 
       const facultadId = await resolveFacultadId(tx, facultyIdByName, cls.faculty);
 
@@ -793,6 +831,7 @@ export const replaceAllSchedulesFromRows = async (
       classesCount: importedClasses,
       rowsCount: rows.length,
       slotsCount: importedSlots,
+      replacedEvents,
       skippedClasses,
       skippedSlots,
     };

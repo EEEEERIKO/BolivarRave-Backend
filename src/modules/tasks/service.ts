@@ -105,6 +105,13 @@ async function bootstrapTasksSchema() {
     `ALTER TABLE public.tareas_catalogo ADD COLUMN IF NOT EXISTS hora_finalizacion time NULL`,
     `ALTER TABLE public.tareas_catalogo ALTER COLUMN puntos_otorgados SET DEFAULT 0`,
     `
+      CREATE TABLE IF NOT EXISTS public.tareas_espacios_personalizados (
+        id uuid PRIMARY KEY DEFAULT gen_random_uuid(),
+        nombre varchar(120) NOT NULL UNIQUE,
+        creado_en timestamptz NOT NULL DEFAULT now()
+      )
+    `,
+    `
       DO $$
       BEGIN
         IF NOT EXISTS (
@@ -125,6 +132,14 @@ async function bootstrapTasksSchema() {
         tarea_catalogo_id uuid NOT NULL REFERENCES public.tareas_catalogo(id) ON DELETE CASCADE,
         habilidad_id uuid NOT NULL REFERENCES public.habilidades(id) ON DELETE RESTRICT,
         CONSTRAINT tareas_catalogo_habilidades_uq UNIQUE (tarea_catalogo_id, habilidad_id)
+      )
+    `,
+    `
+      CREATE TABLE IF NOT EXISTS public.tareas_catalogo_staff (
+        id uuid PRIMARY KEY DEFAULT gen_random_uuid(),
+        tarea_catalogo_id uuid NOT NULL REFERENCES public.tareas_catalogo(id) ON DELETE CASCADE,
+        staff_id uuid NOT NULL REFERENCES public.staff(id) ON DELETE RESTRICT,
+        CONSTRAINT tareas_catalogo_staff_uq UNIQUE (tarea_catalogo_id, staff_id)
       )
     `,
     `
@@ -172,8 +187,11 @@ async function bootstrapTasksSchema() {
     `CREATE INDEX IF NOT EXISTS idx_tareas_catalogo_habilidad_req ON public.tareas_catalogo(habilidad_requerida_id)`,
     `CREATE INDEX IF NOT EXISTS idx_tareas_catalogo_sector ON public.tareas_catalogo(sector)`,
     `CREATE INDEX IF NOT EXISTS idx_tareas_catalogo_modo_asignacion ON public.tareas_catalogo(modo_asignacion)`,
+    `CREATE INDEX IF NOT EXISTS idx_tareas_espacios_personalizados_nombre ON public.tareas_espacios_personalizados(nombre)`,
     `CREATE INDEX IF NOT EXISTS idx_tareas_catalogo_habilidades_catalogo_id ON public.tareas_catalogo_habilidades(tarea_catalogo_id)`,
     `CREATE INDEX IF NOT EXISTS idx_tareas_catalogo_habilidades_habilidad_id ON public.tareas_catalogo_habilidades(habilidad_id)`,
+    `CREATE INDEX IF NOT EXISTS idx_tareas_catalogo_staff_catalogo_id ON public.tareas_catalogo_staff(tarea_catalogo_id)`,
+    `CREATE INDEX IF NOT EXISTS idx_tareas_catalogo_staff_staff_id ON public.tareas_catalogo_staff(staff_id)`,
     `CREATE INDEX IF NOT EXISTS idx_tareas_instancias_catalogo_id ON public.tareas_instancias(tarea_catalogo_id)`,
     `CREATE INDEX IF NOT EXISTS idx_tareas_instancias_salon_id ON public.tareas_instancias(salon_id)`,
     `CREATE INDEX IF NOT EXISTS idx_tareas_instancias_estado ON public.tareas_instancias(estado)`,
@@ -214,6 +232,7 @@ export type CatalogoTask = {
   modoAsignacion: TareaModoAsignacion;
   cantidadPersonal: number;
   habilidadesRequeridasIds: string[];
+  staffAsignadosIds: string[];
   diasSemana: number[];
   horaProgramada: string | null;
   fechaEsporadica: string | null;
@@ -228,6 +247,14 @@ export type CatalogoTask = {
 export type Habilidad = {
   id: string;
   nombre: string;
+};
+
+export type TaskSpace = {
+  id: string;
+  nombre: string;
+  piso: number | null;
+  tipo: "predefinido" | "personalizado";
+  editable: boolean;
 };
 
 export type StaffHabilidad = {
@@ -264,6 +291,7 @@ export type CreateCatalogTaskInput = {
   modoAsignacion: TareaModoAsignacion;
   cantidadPersonal: number;
   habilidadesRequeridasIds: string[];
+  staffAsignadosIds: string[];
   diasSemana: number[];
   horaProgramada: string | null;
   fechaEsporadica: string | null;
@@ -311,6 +339,10 @@ export type LinkStaffHabilidadInput = {
   habilidadId: string;
 };
 
+export type CreateTaskSpaceInput = {
+  nombre: string;
+};
+
 type CatalogoTaskRow = {
   id: string;
   nombre: string;
@@ -319,6 +351,7 @@ type CatalogoTaskRow = {
   modo_asignacion: TareaModoAsignacion;
   cantidad_personal: number;
   habilidades_requeridas_ids: string[];
+  staff_asignados_ids: string[];
   dias_semana: number[];
   hora_programada: string | null;
   fecha_esporadica: string | null;
@@ -331,6 +364,17 @@ type CatalogoTaskRow = {
 };
 
 type HabilidadRow = {
+  id: string;
+  nombre: string;
+};
+
+type TaskSpacePredefinedRow = {
+  id: string;
+  nombre: string;
+  piso: number | null;
+};
+
+type TaskSpaceCustomRow = {
   id: string;
   nombre: string;
 };
@@ -372,6 +416,7 @@ export const listTaskCatalog = async () => {
       t.modo_asignacion::text AS modo_asignacion,
       t.cantidad_personal,
       COALESCE(array_agg(DISTINCT tch.habilidad_id::text) FILTER (WHERE tch.habilidad_id IS NOT NULL), ARRAY[]::text[]) AS habilidades_requeridas_ids,
+      COALESCE(array_agg(DISTINCT tcs.staff_id::text) FILTER (WHERE tcs.staff_id IS NOT NULL), ARRAY[]::text[]) AS staff_asignados_ids,
       COALESCE(t.dias_semana, ARRAY[]::smallint[])::int[] AS dias_semana,
       TO_CHAR(t.hora_programada, 'HH24:MI') AS hora_programada,
       TO_CHAR(t.fecha_esporadica, 'YYYY-MM-DD') AS fecha_esporadica,
@@ -383,6 +428,7 @@ export const listTaskCatalog = async () => {
       t.tiempo_estimado_min
     FROM public.tareas_catalogo t
     LEFT JOIN public.tareas_catalogo_habilidades tch ON tch.tarea_catalogo_id = t.id
+    LEFT JOIN public.tareas_catalogo_staff tcs ON tcs.tarea_catalogo_id = t.id
     GROUP BY t.id
     ORDER BY t.nombre ASC
   `;
@@ -395,6 +441,7 @@ export const listTaskCatalog = async () => {
     modoAsignacion: row.modo_asignacion,
     cantidadPersonal: row.cantidad_personal,
     habilidadesRequeridasIds: row.habilidades_requeridas_ids,
+    staffAsignadosIds: row.staff_asignados_ids,
     diasSemana: row.dias_semana,
     horaProgramada: row.hora_programada,
     fechaEsporadica: row.fecha_esporadica,
@@ -460,6 +507,14 @@ export const createTaskCatalog = async (payload: CreateCatalogTaskInput) => {
       `;
     }
 
+    for (const staffId of payload.staffAsignadosIds) {
+      await tx.$executeRaw`
+        INSERT INTO public.tareas_catalogo_staff (tarea_catalogo_id, staff_id)
+        VALUES (${id}::uuid, ${staffId}::uuid)
+        ON CONFLICT (tarea_catalogo_id, staff_id) DO NOTHING
+      `;
+    }
+
     return { id };
   });
 };
@@ -497,11 +552,24 @@ export const updateTaskCatalog = async (payload: UpdateCatalogTaskInput) => {
       WHERE tarea_catalogo_id = ${id}::uuid
     `;
 
+    await tx.$executeRaw`
+      DELETE FROM public.tareas_catalogo_staff
+      WHERE tarea_catalogo_id = ${id}::uuid
+    `;
+
     for (const skillId of payload.habilidadesRequeridasIds) {
       await tx.$executeRaw`
         INSERT INTO public.tareas_catalogo_habilidades (tarea_catalogo_id, habilidad_id)
         VALUES (${id}::uuid, ${skillId}::uuid)
         ON CONFLICT (tarea_catalogo_id, habilidad_id) DO NOTHING
+      `;
+    }
+
+    for (const staffId of payload.staffAsignadosIds) {
+      await tx.$executeRaw`
+        INSERT INTO public.tareas_catalogo_staff (tarea_catalogo_id, staff_id)
+        VALUES (${id}::uuid, ${staffId}::uuid)
+        ON CONFLICT (tarea_catalogo_id, staff_id) DO NOTHING
       `;
     }
 
@@ -550,6 +618,68 @@ export const listHabilidades = async () => {
     id: row.id,
     nombre: row.nombre,
   } satisfies Habilidad));
+};
+
+export const listTaskSpaces = async () => {
+  const customRows = await prisma.$queryRaw<TaskSpaceCustomRow[]>`
+    SELECT
+      e.id::text AS id,
+      e.nombre
+    FROM public.tareas_espacios_personalizados e
+    ORDER BY e.nombre ASC
+  `;
+
+  let predefinedRows: TaskSpacePredefinedRow[] = [];
+  try {
+    predefinedRows = await prisma.$queryRaw<TaskSpacePredefinedRow[]>`
+      SELECT
+        s.id::text AS id,
+        s.nombre,
+        s.piso
+      FROM public.salones s
+      ORDER BY s.piso ASC NULLS LAST, s.nombre ASC
+    `;
+  } catch {
+    predefinedRows = [];
+  }
+
+  const predefinedSpaces = predefinedRows.map((row) => ({
+    id: `predef-${row.id}`,
+    nombre: row.piso ? `Piso ${row.piso} · ${row.nombre}` : row.nombre,
+    piso: row.piso,
+    tipo: "predefinido",
+    editable: false,
+  } satisfies TaskSpace));
+
+  const customSpaces = customRows.map((row) => ({
+    id: row.id,
+    nombre: row.nombre,
+    piso: null,
+    tipo: "personalizado",
+    editable: true,
+  } satisfies TaskSpace));
+
+  return [...predefinedSpaces, ...customSpaces];
+};
+
+export const createTaskSpace = async (payload: CreateTaskSpaceInput) => {
+  const trimmedName = payload.nombre.trim();
+  if (!trimmedName) {
+    throw new Error("El nombre del espacio es obligatorio");
+  }
+
+  const created = await prisma.$queryRaw<Array<{ id: string }>>`
+    INSERT INTO public.tareas_espacios_personalizados (nombre)
+    VALUES (${trimmedName})
+    RETURNING id::text AS id
+  `;
+
+  const id = created[0]?.id;
+  if (!id) {
+    throw new Error("No se pudo crear el espacio");
+  }
+
+  return { id };
 };
 
 export const createHabilidad = async (payload: CreateHabilidadInput) => {
@@ -771,36 +901,91 @@ export const listTaskInstances = async (estado?: TareaEstado) => {
 };
 
 export const createTaskInstance = async (payload: CreateTaskInstanceInput) => {
-  const created = await prisma.$queryRaw<Array<{ id: string }>>`
-    INSERT INTO public.tareas_instancias (
-      tarea_catalogo_id,
-      salon_id,
-      detalle_adicional,
-      prioridad,
-      estado,
-      fecha_programada,
-      hora_programada,
-      asignacion_automatica
-    )
-    VALUES (
-      ${payload.tareaCatalogoId}::uuid,
-      ${payload.salonId}::uuid,
-      ${payload.detalleAdicional},
-      ${payload.prioridad}::public.tarea_prioridad_enum,
-      'Pendiente'::public.tarea_estado_enum,
-      ${payload.fechaProgramada}::date,
-      ${payload.horaProgramada}::time,
-      ${payload.asignacionAutomatica}
-    )
-    RETURNING id::text AS id
-  `;
+  return prisma.$transaction(async (tx) => {
+    const created = await tx.$queryRaw<Array<{ id: string }>>`
+      INSERT INTO public.tareas_instancias (
+        tarea_catalogo_id,
+        salon_id,
+        detalle_adicional,
+        prioridad,
+        estado,
+        fecha_programada,
+        hora_programada,
+        asignacion_automatica
+      )
+      VALUES (
+        ${payload.tareaCatalogoId}::uuid,
+        ${payload.salonId}::uuid,
+        ${payload.detalleAdicional},
+        ${payload.prioridad}::public.tarea_prioridad_enum,
+        'Pendiente'::public.tarea_estado_enum,
+        ${payload.fechaProgramada}::date,
+        ${payload.horaProgramada}::time,
+        ${payload.asignacionAutomatica}
+      )
+      RETURNING id::text AS id
+    `;
 
-  const id = created[0]?.id;
-  if (!id) {
-    throw new Error("No se pudo crear la instancia de tarea");
-  }
+    const id = created[0]?.id;
+    if (!id) {
+      throw new Error("No se pudo crear la instancia de tarea");
+    }
 
-  return { id };
+    const catalogConfig = await tx.$queryRaw<Array<{
+      modo_asignacion: TareaModoAsignacion;
+      cantidad_personal: number;
+    }>>`
+      SELECT
+        modo_asignacion::text AS modo_asignacion,
+        cantidad_personal
+      FROM public.tareas_catalogo
+      WHERE id = ${payload.tareaCatalogoId}::uuid
+      LIMIT 1
+    `;
+
+    const config = catalogConfig[0];
+    if (!config) {
+      return { id };
+    }
+
+    const shouldAutoAssign = payload.asignacionAutomatica || config.modo_asignacion === "automatica";
+    if (!shouldAutoAssign) {
+      return { id };
+    }
+
+    const preferredStaff = await tx.$queryRaw<Array<{ staff_id: string }>>`
+      SELECT staff_id::text AS staff_id
+      FROM public.tareas_catalogo_staff
+      WHERE tarea_catalogo_id = ${payload.tareaCatalogoId}::uuid
+      ORDER BY staff_id ASC
+    `;
+
+    if (preferredStaff.length === 0) {
+      return { id };
+    }
+
+    const previousInstances = await tx.$queryRaw<Array<{ total: number }>>`
+      SELECT COUNT(*)::int AS total
+      FROM public.tareas_instancias
+      WHERE tarea_catalogo_id = ${payload.tareaCatalogoId}::uuid
+        AND id <> ${id}::uuid
+    `;
+
+    const rotationStart = (previousInstances[0]?.total ?? 0) % preferredStaff.length;
+    const targetAssignments = Math.min(config.cantidad_personal, preferredStaff.length);
+
+    for (let i = 0; i < targetAssignments; i += 1) {
+      const picked = preferredStaff[(rotationStart + i) % preferredStaff.length];
+      if (!picked?.staff_id) continue;
+
+      await tx.$executeRaw`
+        INSERT INTO public.tareas_asignaciones (tarea_instancia_id, staff_id)
+        VALUES (${id}::uuid, ${picked.staff_id}::uuid)
+      `;
+    }
+
+    return { id };
+  });
 };
 
 export const assignTaskToStaff = async (payload: AssignTaskInput) => {

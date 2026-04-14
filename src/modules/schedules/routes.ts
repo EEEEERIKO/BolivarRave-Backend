@@ -62,7 +62,7 @@ const parsedRowSchema = z.object({
 
 const parsedImportSchema = z.object({
   sourceFile: z.string().min(1),
-  rows: z.array(parsedRowSchema).min(1),
+  rows: z.array(parsedRowSchema),
   meta: z
     .object({
       conflictsDetected: z.number().int().min(0).optional(),
@@ -368,12 +368,38 @@ schedulesRouter.post("/import-parsed", requireAdminKey, async (req, res, next) =
     }
 
     if (error instanceof Error) {
+      console.error("[Schedules Import] Failed", {
+        route: "/import-parsed",
+        message: error.message,
+        stack: error.stack,
+      });
+
       const message = error.message.toLowerCase();
+      if (message.includes("no se pudo resolver la facultad")) {
+        return res.status(400).json({ error: error.message });
+      }
+
+      if (message.includes("el salon") && message.includes("catalogo oficial")) {
+        return res.status(400).json({ error: error.message });
+      }
+
+      if (message.includes("dia invalido en importacion")) {
+        return res.status(400).json({ error: error.message });
+      }
+
+      if (message.includes("no se pudo crear el evento")) {
+        return res.status(400).json({ error: error.message });
+      }
+
       if (message.includes("overlap") || message.includes("solap")) {
         return res.status(409).json({
           error: "El archivo contiene clases que se solapan en el mismo salon/dia/rango de fechas.",
         });
       }
+
+      return res.status(400).json({
+        error: error.message || "No se pudo importar el horario por datos invalidos.",
+      });
     }
 
     return next(error);
@@ -406,12 +432,38 @@ schedulesRouter.post("/import", requireAdminKey, upload.single("file"), async (r
     });
   } catch (error) {
     if (error instanceof Error) {
+      console.error("[Schedules Import] Failed", {
+        route: "/import",
+        message: error.message,
+        stack: error.stack,
+      });
+
       const message = error.message.toLowerCase();
+      if (message.includes("no se pudo resolver la facultad")) {
+        return res.status(400).json({ error: error.message });
+      }
+
+      if (message.includes("el salon") && message.includes("catalogo oficial")) {
+        return res.status(400).json({ error: error.message });
+      }
+
+      if (message.includes("dia invalido en importacion")) {
+        return res.status(400).json({ error: error.message });
+      }
+
+      if (message.includes("no se pudo crear el evento")) {
+        return res.status(400).json({ error: error.message });
+      }
+
       if (message.includes("classslot_no_overlap") || message.includes("overlap") || message.includes("solap")) {
         return res.status(409).json({
           error: "El archivo contiene clases que se solapan en el mismo salon/dia/rango de fechas.",
         });
       }
+
+      return res.status(400).json({
+        error: error.message || "No se pudo importar el horario por datos invalidos.",
+      });
     }
 
     return next(error);
