@@ -904,6 +904,63 @@ export const listAllStaffJornadasSemanales = async () => {
   return grouped;
 };
 
+export const listAllStaffPausasProgramadas = async () => {
+  await ensureStaffHorarioLaboralSchemaReady();
+
+  const rows = await prisma.$queryRaw<StaffPausaRawRow[]>`
+    SELECT
+      p.id::text AS id,
+      p.staff_id::text AS staff_id,
+      p.dia_semana::text AS dia_semana,
+      p.tipo_pausa::text AS tipo_pausa,
+      TO_CHAR(p.hora_inicio, 'HH24:MI') AS hora_inicio,
+      TO_CHAR(p.hora_fin, 'HH24:MI') AS hora_fin
+    FROM public.staff_pausas_programadas p
+    ORDER BY
+      CASE p.dia_semana::text
+        WHEN 'Lunes' THEN 1
+        WHEN 'Martes' THEN 2
+        WHEN 'Miercoles' THEN 3
+        WHEN 'Jueves' THEN 4
+        WHEN 'Viernes' THEN 5
+        WHEN 'Sabado' THEN 6
+        WHEN 'Domingo' THEN 7
+        ELSE 99
+      END ASC,
+      p.hora_inicio ASC,
+      p.id ASC
+  `;
+
+  const grouped: Record<string, Array<{
+    id: string;
+    staffId: string;
+    diaSemana: string;
+    tipoPausa: string;
+    horaInicio: string;
+    horaFin: string;
+  }>> = {};
+
+  for (const row of rows) {
+    if (!grouped[row.staff_id]) {
+      grouped[row.staff_id] = [];
+    }
+
+    const target = grouped[row.staff_id];
+    if (!target) continue;
+
+    target.push({
+      id: row.id,
+      staffId: row.staff_id,
+      diaSemana: row.dia_semana,
+      tipoPausa: row.tipo_pausa,
+      horaInicio: row.hora_inicio,
+      horaFin: row.hora_fin,
+    });
+  }
+
+  return grouped;
+};
+
 export const replaceStaffJornadaSemanal = async (staffId: string, jornadas: StaffJornadaInput[]) => {
   await ensureStaffHorarioLaboralSchemaReady();
 

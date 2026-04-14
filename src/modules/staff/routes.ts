@@ -12,6 +12,7 @@ import {
   getStaffById,
   listStaffSkills,
   listAllStaffJornadasSemanales,
+  listAllStaffPausasProgramadas,
   listStaffJornadaSemanal,
   listStaffPausasProgramadas,
   listStaff,
@@ -302,6 +303,16 @@ staffRouter.get("/:id", async (req, res, next) => {
     if (req.params.id === "skills") {
       const habilidades = await listStaffSkills();
       return res.json({ habilidades });
+    }
+
+    if (req.params.id === "jornadas-bulk") {
+      const jornadasByStaffId = await listAllStaffJornadasSemanales();
+      return res.json({ jornadas: jornadasByStaffId });
+    }
+
+    if (req.params.id === "pausas-bulk") {
+      const pausasByStaffId = await listAllStaffPausasProgramadas();
+      return res.json({ pausas: pausasByStaffId });
     }
 
     const { id } = idParamsSchema.parse(req.params);
