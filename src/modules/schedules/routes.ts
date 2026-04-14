@@ -546,6 +546,19 @@ schedulesRouter.put("/events/:eventId/:slotId", requireAdminKey, async (req, res
     const params = eventSlotParamsSchema.parse(req.params);
     const body = updateEventSchema.parse(req.body);
 
+    if (process.env.NODE_ENV !== "production") {
+      console.log("[Schedules][route-put] incoming", {
+        eventId: params.eventId,
+        slotId: params.slotId,
+        updateScope: body.updateScope ?? "always",
+        targetDate: body.targetDate ?? null,
+        day: body.day,
+        room: body.room,
+        start: body.start,
+        end: body.end,
+      });
+    }
+
     const updatePayload = {
       eventId: params.eventId,
       slotId: params.slotId,
@@ -564,6 +577,15 @@ schedulesRouter.put("/events/:eventId/:slotId", requireAdminKey, async (req, res
     };
 
     await updateScheduleEventSlot(updatePayload);
+
+    if (process.env.NODE_ENV !== "production") {
+      console.log("[Schedules][route-put] updated", {
+        eventId: params.eventId,
+        slotId: params.slotId,
+        updateScope: updatePayload.updateScope ?? "always",
+        targetDate: body.targetDate ?? null,
+      });
+    }
 
     // Notificar sobre evento actualizado
     broadcastScheduleRefresh();

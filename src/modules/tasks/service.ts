@@ -103,6 +103,15 @@ async function bootstrapTasksSchema() {
     `ALTER TABLE public.tareas_catalogo ADD COLUMN IF NOT EXISTS tarea_finalizacion varchar(200) NULL`,
     `ALTER TABLE public.tareas_catalogo ADD COLUMN IF NOT EXISTS fecha_finalizacion date NULL`,
     `ALTER TABLE public.tareas_catalogo ADD COLUMN IF NOT EXISTS hora_finalizacion time NULL`,
+    `
+      CREATE TABLE IF NOT EXISTS public.tareas_catalogo_requerimientos (
+        id uuid PRIMARY KEY DEFAULT gen_random_uuid(),
+        tarea_catalogo_id uuid NOT NULL REFERENCES public.tareas_catalogo(id) ON DELETE CASCADE,
+        nombre varchar(120) NOT NULL,
+        orden smallint NOT NULL DEFAULT 0,
+        CONSTRAINT tareas_catalogo_requerimientos_uq UNIQUE (tarea_catalogo_id, nombre)
+      )
+    `,
     `ALTER TABLE public.tareas_catalogo ALTER COLUMN puntos_otorgados SET DEFAULT 0`,
     `
       CREATE TABLE IF NOT EXISTS public.tareas_espacios_personalizados (
@@ -188,6 +197,8 @@ async function bootstrapTasksSchema() {
     `CREATE INDEX IF NOT EXISTS idx_tareas_catalogo_sector ON public.tareas_catalogo(sector)`,
     `CREATE INDEX IF NOT EXISTS idx_tareas_catalogo_modo_asignacion ON public.tareas_catalogo(modo_asignacion)`,
     `CREATE INDEX IF NOT EXISTS idx_tareas_espacios_personalizados_nombre ON public.tareas_espacios_personalizados(nombre)`,
+    `CREATE INDEX IF NOT EXISTS idx_tareas_catalogo_requerimientos_catalogo_id ON public.tareas_catalogo_requerimientos(tarea_catalogo_id)`,
+    `CREATE INDEX IF NOT EXISTS idx_tareas_catalogo_requerimientos_orden ON public.tareas_catalogo_requerimientos(tarea_catalogo_id, orden)`,
     `CREATE INDEX IF NOT EXISTS idx_tareas_catalogo_habilidades_catalogo_id ON public.tareas_catalogo_habilidades(tarea_catalogo_id)`,
     `CREATE INDEX IF NOT EXISTS idx_tareas_catalogo_habilidades_habilidad_id ON public.tareas_catalogo_habilidades(habilidad_id)`,
     `CREATE INDEX IF NOT EXISTS idx_tareas_catalogo_staff_catalogo_id ON public.tareas_catalogo_staff(tarea_catalogo_id)`,
@@ -232,6 +243,7 @@ export type CatalogoTask = {
   modoAsignacion: TareaModoAsignacion;
   cantidadPersonal: number;
   habilidadesRequeridasIds: string[];
+  requerimientos: string[];
   staffAsignadosIds: string[];
   diasSemana: number[];
   horaProgramada: string | null;
@@ -291,6 +303,7 @@ export type CreateCatalogTaskInput = {
   modoAsignacion: TareaModoAsignacion;
   cantidadPersonal: number;
   habilidadesRequeridasIds: string[];
+  requerimientos: string[];
   staffAsignadosIds: string[];
   diasSemana: number[];
   horaProgramada: string | null;
@@ -351,6 +364,7 @@ type CatalogoTaskRow = {
   modo_asignacion: TareaModoAsignacion;
   cantidad_personal: number;
   habilidades_requeridas_ids: string[];
+  requerimientos: string[];
   staff_asignados_ids: string[];
   dias_semana: number[];
   hora_programada: string | null;
@@ -416,6 +430,7 @@ export const listTaskCatalog = async () => {
       t.modo_asignacion::text AS modo_asignacion,
       t.cantidad_personal,
       COALESCE(array_agg(DISTINCT tch.habilidad_id::text) FILTER (WHERE tch.habilidad_id IS NOT NULL), ARRAY[]::text[]) AS habilidades_requeridas_ids,
+      COALESCE(array_agg(DISTINCT tcr.nombre ORDER BY tcr.nombre ASC) FILTER (WHERE tcr.nombre IS NOT NULL), ARRAY[]::text[]) AS requerimientos,
       COALESCE(array_agg(DISTINCT tcs.staff_id::text) FILTER (WHERE tcs.staff_id IS NOT NULL), ARRAY[]::text[]) AS staff_asignados_ids,
       COALESCE(t.dias_semana, ARRAY[]::smallint[])::int[] AS dias_semana,
       TO_CHAR(t.hora_programada, 'HH24:MI') AS hora_programada,
@@ -428,6 +443,7 @@ export const listTaskCatalog = async () => {
       t.tiempo_estimado_min
     FROM public.tareas_catalogo t
     LEFT JOIN public.tareas_catalogo_habilidades tch ON tch.tarea_catalogo_id = t.id
+    LEFT JOIN public.tareas_catalogo_requerimientos tcr ON tcr.tarea_catalogo_id = t.id
     LEFT JOIN public.tareas_catalogo_staff tcs ON tcs.tarea_catalogo_id = t.id
     GROUP BY t.id
     ORDER BY t.nombre ASC
@@ -441,6 +457,7 @@ export const listTaskCatalog = async () => {
     modoAsignacion: row.modo_asignacion,
     cantidadPersonal: row.cantidad_personal,
     habilidadesRequeridasIds: row.habilidades_requeridas_ids,
+    requerimientos: row.requerimientos,
     staffAsignadosIds: row.staff_asignados_ids,
     diasSemana: row.dias_semana,
     horaProgramada: row.hora_programada,
@@ -507,6 +524,15 @@ export const createTaskCatalog = async (payload: CreateCatalogTaskInput) => {
       `;
     }
 
+    for (const [orden, nombre] of payload.requerimientos.entries()) {
+      await tx.$executeRaw`
+        INSERT INTO public.tareas_catalogo_requerimientos (tarea_catalogo_id, nombre, orden)
+        VALUES (${id}::uuid, ${nombre}, ${orden})
+        ON CONFLICT (tarea_catalogo_id, nombre) DO UPDATE
+        SET orden = EXCLUDED.orden
+      `;
+    }
+
     for (const staffId of payload.staffAsignadosIds) {
       await tx.$executeRaw`
         INSERT INTO public.tareas_catalogo_staff (tarea_catalogo_id, staff_id)
@@ -553,6 +579,11 @@ export const updateTaskCatalog = async (payload: UpdateCatalogTaskInput) => {
     `;
 
     await tx.$executeRaw`
+      DELETE FROM public.tareas_catalogo_requerimientos
+      WHERE tarea_catalogo_id = ${id}::uuid
+    `;
+
+    await tx.$executeRaw`
       DELETE FROM public.tareas_catalogo_staff
       WHERE tarea_catalogo_id = ${id}::uuid
     `;
@@ -562,6 +593,15 @@ export const updateTaskCatalog = async (payload: UpdateCatalogTaskInput) => {
         INSERT INTO public.tareas_catalogo_habilidades (tarea_catalogo_id, habilidad_id)
         VALUES (${id}::uuid, ${skillId}::uuid)
         ON CONFLICT (tarea_catalogo_id, habilidad_id) DO NOTHING
+      `;
+    }
+
+    for (const [orden, nombre] of payload.requerimientos.entries()) {
+      await tx.$executeRaw`
+        INSERT INTO public.tareas_catalogo_requerimientos (tarea_catalogo_id, nombre, orden)
+        VALUES (${id}::uuid, ${nombre}, ${orden})
+        ON CONFLICT (tarea_catalogo_id, nombre) DO UPDATE
+        SET orden = EXCLUDED.orden
       `;
     }
 

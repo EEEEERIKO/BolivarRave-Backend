@@ -293,28 +293,26 @@ staffRouter.get("/skills", async (_req, res, next) => {
   }
 });
 
+staffRouter.get("/jornadas-bulk", async (_req, res, next) => {
+  try {
+    const jornadasByStaffId = await listAllStaffJornadasSemanales();
+    return res.json({ jornadas: jornadasByStaffId });
+  } catch (error) {
+    return next(error);
+  }
+});
+
+staffRouter.get("/pausas-bulk", async (_req, res, next) => {
+  try {
+    const pausasByStaffId = await listAllStaffPausasProgramadas();
+    return res.json({ pausas: pausasByStaffId });
+  } catch (error) {
+    return next(error);
+  }
+});
+
 staffRouter.get("/:id", async (req, res, next) => {
   try {
-    if (req.params.id === "next-number") {
-      const numeroStaff = await getNextStaffNumber();
-      return res.json({ numeroStaff });
-    }
-
-    if (req.params.id === "skills") {
-      const habilidades = await listStaffSkills();
-      return res.json({ habilidades });
-    }
-
-    if (req.params.id === "jornadas-bulk") {
-      const jornadasByStaffId = await listAllStaffJornadasSemanales();
-      return res.json({ jornadas: jornadasByStaffId });
-    }
-
-    if (req.params.id === "pausas-bulk") {
-      const pausasByStaffId = await listAllStaffPausasProgramadas();
-      return res.json({ pausas: pausasByStaffId });
-    }
-
     const { id } = idParamsSchema.parse(req.params);
     const staff = await getStaffById(id);
 

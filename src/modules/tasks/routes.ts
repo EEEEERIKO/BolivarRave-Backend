@@ -58,6 +58,7 @@ const createCatalogSchema = z.object({
   modoAsignacion: z.enum(modoAsignacionEnum),
   cantidadPersonal: z.number().int().min(1).max(50),
   habilidadesRequeridasIds: z.array(z.string().uuid()).max(30).default([]),
+  requerimientos: z.array(z.string().trim().min(2).max(120)).max(20).default([]),
   programacionRecurrente: z.enum(programacionRecurrenteEnum).default("diaria_libre"),
   diasSemana: z.array(z.number().int().min(0).max(6)).max(7).default([]),
   horaProgramada: z.string().regex(/^\d{2}:\d{2}$/).nullable().optional(),
@@ -270,6 +271,7 @@ tasksRouter.post("/catalog", requireAdminKey, async (req, res, next) => {
       modoAsignacion: parsed.modoAsignacion as TareaModoAsignacion,
       cantidadPersonal: parsed.cantidadPersonal,
       habilidadesRequeridasIds: Array.from(new Set(parsed.habilidadesRequeridasIds)),
+      requerimientos: Array.from(new Set(parsed.requerimientos.map((item) => item.trim()))),
       diasSemana: parsed.tipo === "Recurrente" && parsed.programacionRecurrente === "programada"
         ? Array.from(new Set(parsed.diasSemana)).sort((a, b) => a - b)
         : [],
@@ -312,6 +314,7 @@ tasksRouter.put("/catalog/:id", requireAdminKey, async (req, res, next) => {
       modoAsignacion: parsed.modoAsignacion as TareaModoAsignacion,
       cantidadPersonal: parsed.cantidadPersonal,
       habilidadesRequeridasIds: Array.from(new Set(parsed.habilidadesRequeridasIds)),
+      requerimientos: Array.from(new Set(parsed.requerimientos.map((item) => item.trim()))),
       diasSemana: parsed.tipo === "Recurrente" && parsed.programacionRecurrente === "programada"
         ? Array.from(new Set(parsed.diasSemana)).sort((a, b) => a - b)
         : [],
