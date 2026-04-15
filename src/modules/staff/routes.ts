@@ -2,6 +2,7 @@ import { Router } from "express";
 import { z } from "zod";
 import { broadcastScheduleRefresh } from "../../lib/websocket";
 import {
+  authenticateStaffLogin,
   createStaffPausaProgramada,
   createStaff,
   deleteStaffPausaProgramada,
@@ -17,6 +18,7 @@ import {
   listStaffPausasProgramadas,
   listStaff,
   replaceStaffJornadaSemanal,
+  StaffAuthError,
   updateStaffPausaProgramada,
   updateStaff,
   updateStaffEstado,
@@ -97,6 +99,12 @@ const pausaBodySchema = z.object({
 const resumenContratoBodySchema = z.object({
   horasSemanalesContrato: z.number().int().min(1).max(168),
   balanceHoras: z.number().min(-10000).max(10000),
+});
+
+const loginBodySchema = z.object({
+  cedula: z.string().trim().min(5).max(20),
+  portal: z.enum(["admin-monitor", "colaborador"]),
+  password: z.string().min(1).max(128).optional(),
 });
 
 const requireAdminKey: import("express").RequestHandler = (req, res, next) => {
@@ -307,6 +315,32 @@ staffRouter.get("/pausas-bulk", async (_req, res, next) => {
     const pausasByStaffId = await listAllStaffPausasProgramadas();
     return res.json({ pausas: pausasByStaffId });
   } catch (error) {
+    return next(error);
+  }
+});
+
+staffRouter.post("/login", async (req, res, next) => {
+  try {
+    const parsed = loginBodySchema.parse(req.body);
+
+    const session = await authenticateStaffLogin({
+      cedula: parsed.cedula,
+      portal: parsed.portal,
+      ...(parsed.password ? { password: parsed.password } : {}),
+    });
+
+    return res.json({ session });
+  } catch (error) {
+    if (error instanceof z.ZodError) {
+      return res.status(400).json({
+        error: `Payload invalido: ${error.issues[0]?.message ?? "error de validacion"}`,
+      });
+    }
+
+    if (error instanceof StaffAuthError) {
+      return res.status(error.status).json({ error: error.message });
+    }
+
     return next(error);
   }
 });

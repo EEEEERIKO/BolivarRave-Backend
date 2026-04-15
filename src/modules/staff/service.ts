@@ -1,5 +1,5 @@
 import { prisma } from "../../lib/prisma";
-import { randomBytes, scrypt as scryptCallback } from "node:crypto";
+import { randomBytes, scrypt as scryptCallback, timingSafeEqual } from "node:crypto";
 import { promisify } from "node:util";
 
 export type StaffEstado = "Active" | "Inactive";
@@ -106,6 +106,37 @@ type StaffResumenContratoRawRow = {
   horas_semanales_contrato: number;
   balance_horas: number;
 };
+
+type StaffLoginRawRow = {
+  id: string;
+  role_id: number;
+  rol: string;
+  nombres: string;
+  apellidos: string;
+  cedula: string;
+  estado: StaffEstado;
+  password_hash: string | null;
+};
+
+export type StaffLoginPortal = "admin-monitor" | "colaborador";
+
+export type StaffLoginResult = {
+  staffId: string;
+  cedula: string;
+  role: "admin" | "monitor" | "colaborador";
+  roleLabel: string;
+  name: string;
+};
+
+export class StaffAuthError extends Error {
+  readonly status: number;
+
+  constructor(message: string, status: number) {
+    super(message);
+    this.name = "StaffAuthError";
+    this.status = status;
+  }
+}
 
 type SqlExecutor = Pick<typeof prisma, "$executeRaw">;
 
@@ -281,6 +312,37 @@ const hashPassword = async (password: string) => {
   const derivedKey = (await scryptAsync(password, salt, 64)) as Buffer;
 
   return `scrypt$N=16384,r=8,p=1$${salt.toString("hex")}$${derivedKey.toString("hex")}`;
+};
+
+const verifyPasswordHash = async (plainPassword: string, storedHash: string) => {
+  const parts = storedHash.split("$");
+  if (parts.length !== 4) {
+    return false;
+  }
+
+  const [algo, _params, saltHex, keyHex] = parts;
+  if (algo !== "scrypt" || !saltHex || !keyHex) {
+    return false;
+  }
+
+  const salt = Buffer.from(saltHex, "hex");
+  const expectedKey = Buffer.from(keyHex, "hex");
+  if (expectedKey.length === 0) {
+    return false;
+  }
+
+  const derivedKey = (await scryptAsync(plainPassword, salt, expectedKey.length)) as Buffer;
+  if (derivedKey.length !== expectedKey.length) {
+    return false;
+  }
+
+  return timingSafeEqual(derivedKey, expectedKey);
+};
+
+const mapRoleFromRoleId = (roleId: number): StaffLoginResult["role"] => {
+  if (roleId === 1) return "admin";
+  if (roleId === 2) return "monitor";
+  return "colaborador";
 };
 
 const getNextStaffNumberTx = async (tx: Pick<typeof prisma, "$queryRaw">) => {
@@ -499,6 +561,72 @@ export const listStaffSkills = async () => {
 export const getNextStaffNumber = async () => {
   await ensureStaffSecuritySchemaReady();
   return getNextStaffNumberTx(prisma);
+};
+
+export const authenticateStaffLogin = async (payload: {
+  cedula: string;
+  portal: StaffLoginPortal;
+  password?: string;
+}): Promise<StaffLoginResult> => {
+  await ensureStaffSecuritySchemaReady();
+
+  const rows = await prisma.$queryRaw<StaffLoginRawRow[]>`
+    SELECT
+      s.id::text AS id,
+      s.role_id,
+      s.rol,
+      s.nombres,
+      s.apellidos,
+      s.cedula,
+      s.estado,
+      c.password_hash
+    FROM public.staff s
+    LEFT JOIN public.staff_credentials c ON c.staff_id = s.id
+    WHERE s.cedula = ${payload.cedula}
+    LIMIT 1
+  `;
+
+  const staff = rows[0];
+  if (!staff) {
+    throw new StaffAuthError("Credenciales inválidas. Verifica la información ingresada.", 401);
+  }
+
+  if (staff.estado !== "Active") {
+    throw new StaffAuthError("La cuenta se encuentra inactiva. Contacta al administrador.", 403);
+  }
+
+  const requiresPassword = CREDENTIAL_REQUIRED_ROLE_IDS.has(staff.role_id);
+
+  if (payload.portal === "admin-monitor") {
+    if (!requiresPassword) {
+      throw new StaffAuthError("Este usuario no tiene acceso al portal de admin/monitor.", 403);
+    }
+
+    if (!payload.password) {
+      throw new StaffAuthError("La contraseña es obligatoria para este acceso.", 400);
+    }
+
+    if (!staff.password_hash) {
+      throw new StaffAuthError("No hay credenciales registradas para este usuario.", 403);
+    }
+
+    const isPasswordValid = await verifyPasswordHash(payload.password, staff.password_hash);
+    if (!isPasswordValid) {
+      throw new StaffAuthError("Credenciales inválidas. Verifica la información ingresada.", 401);
+    }
+  }
+
+  if (payload.portal === "colaborador" && requiresPassword) {
+    throw new StaffAuthError("Este usuario debe ingresar por el portal de admin/monitor.", 403);
+  }
+
+  return {
+    staffId: staff.id,
+    cedula: staff.cedula,
+    role: mapRoleFromRoleId(staff.role_id),
+    roleLabel: staff.rol,
+    name: `${staff.nombres} ${staff.apellidos}`.trim(),
+  };
 };
 
 export const listStaff = async () => {
