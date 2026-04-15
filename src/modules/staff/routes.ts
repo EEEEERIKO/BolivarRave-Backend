@@ -250,8 +250,35 @@ const handleKnownStaffScheduleError = (error: unknown, res: import("express").Re
   return false;
 };
 
-staffRouter.get("/", async (_req, res, next) => {
+const ensureCollaboradorSelfAccess = (
+  req: import("express").Request,
+  res: import("express").Response,
+  targetStaffId: string,
+) => {
+  const authUser = (req as AuthenticatedRequest).authUser;
+
+  if (!authUser) {
+    res.status(401).json({ error: "No autorizado" });
+    return false;
+  }
+
+  if (authUser.role === "colaborador" && authUser.staffId !== targetStaffId) {
+    res.status(403).json({ error: "Solo puedes consultar tu propio perfil." });
+    return false;
+  }
+
+  return true;
+};
+
+staffRouter.get("/", async (req, res, next) => {
   try {
+    const authUser = (req as AuthenticatedRequest).authUser;
+
+    if (authUser?.role === "colaborador") {
+      const ownStaff = await getStaffById(authUser.staffId);
+      return res.json({ staff: ownStaff ? [ownStaff] : [] });
+    }
+
     const staff = await listStaff();
     return res.json({ staff });
   } catch (error) {
@@ -259,8 +286,15 @@ staffRouter.get("/", async (_req, res, next) => {
   }
 });
 
-staffRouter.get("/jornadas-semanales", async (_req, res, next) => {
+staffRouter.get("/jornadas-semanales", async (req, res, next) => {
   try {
+    const authUser = (req as AuthenticatedRequest).authUser;
+
+    if (authUser?.role === "colaborador") {
+      const ownJornadas = await listStaffJornadaSemanal(authUser.staffId);
+      return res.json({ jornadasByStaffId: { [authUser.staffId]: ownJornadas } });
+    }
+
     const jornadasByStaffId = await listAllStaffJornadasSemanales();
     return res.json({ jornadasByStaffId });
   } catch (error) {
@@ -286,8 +320,15 @@ staffRouter.get("/skills", async (_req, res, next) => {
   }
 });
 
-staffRouter.get("/jornadas-bulk", async (_req, res, next) => {
+staffRouter.get("/jornadas-bulk", async (req, res, next) => {
   try {
+    const authUser = (req as AuthenticatedRequest).authUser;
+
+    if (authUser?.role === "colaborador") {
+      const ownJornadas = await listStaffJornadaSemanal(authUser.staffId);
+      return res.json({ jornadas: { [authUser.staffId]: ownJornadas } });
+    }
+
     const jornadasByStaffId = await listAllStaffJornadasSemanales();
     return res.json({ jornadas: jornadasByStaffId });
   } catch (error) {
@@ -295,8 +336,15 @@ staffRouter.get("/jornadas-bulk", async (_req, res, next) => {
   }
 });
 
-staffRouter.get("/pausas-bulk", async (_req, res, next) => {
+staffRouter.get("/pausas-bulk", async (req, res, next) => {
   try {
+    const authUser = (req as AuthenticatedRequest).authUser;
+
+    if (authUser?.role === "colaborador") {
+      const ownPausas = await listStaffPausasProgramadas(authUser.staffId);
+      return res.json({ pausas: { [authUser.staffId]: ownPausas } });
+    }
+
     const pausasByStaffId = await listAllStaffPausasProgramadas();
     return res.json({ pausas: pausasByStaffId });
   } catch (error) {
@@ -381,6 +429,11 @@ staffRouter.post("/change-password", async (req, res, next) => {
 staffRouter.get("/:id", async (req, res, next) => {
   try {
     const { id } = idParamsSchema.parse(req.params);
+
+    if (!ensureCollaboradorSelfAccess(req, res, id)) {
+      return;
+    }
+
     const staff = await getStaffById(id);
 
     if (!staff) {
@@ -549,6 +602,11 @@ staffRouter.delete("/:id", requireAdminRole, async (req, res, next) => {
 staffRouter.get("/:id/jornada-semanal", async (req, res, next) => {
   try {
     const { id } = idParamsSchema.parse(req.params);
+
+    if (!ensureCollaboradorSelfAccess(req, res, id)) {
+      return;
+    }
+
     const jornadas = await listStaffJornadaSemanal(id);
     return res.json({ jornadas });
   } catch (error) {
@@ -597,6 +655,11 @@ staffRouter.put("/:id/jornada-semanal", requireAdminRole, async (req, res, next)
 staffRouter.get("/:id/pausas-programadas", async (req, res, next) => {
   try {
     const { id } = idParamsSchema.parse(req.params);
+
+    if (!ensureCollaboradorSelfAccess(req, res, id)) {
+      return;
+    }
+
     const pausas = await listStaffPausasProgramadas(id);
     return res.json({ pausas });
   } catch (error) {
@@ -703,6 +766,11 @@ staffRouter.delete("/:id/pausas-programadas/:pausaId", requireAdminRole, async (
 staffRouter.get("/:id/resumen-contrato", async (req, res, next) => {
   try {
     const { id } = idParamsSchema.parse(req.params);
+
+    if (!ensureCollaboradorSelfAccess(req, res, id)) {
+      return;
+    }
+
     const resumen = await getStaffResumenContrato(id);
     return res.json({ resumen });
   } catch (error) {
@@ -750,6 +818,11 @@ staffRouter.put("/:id/resumen-contrato", requireAdminRole, async (req, res, next
 staffRouter.get("/:id/horario-laboral", async (req, res, next) => {
   try {
     const { id } = idParamsSchema.parse(req.params);
+
+    if (!ensureCollaboradorSelfAccess(req, res, id)) {
+      return;
+    }
+
     const horarioLaboral = await getStaffHorarioLaboral(id);
     return res.json({ horarioLaboral });
   } catch (error) {

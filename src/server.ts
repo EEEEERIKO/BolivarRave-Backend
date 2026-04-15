@@ -8,7 +8,7 @@ import { auditorioRouter } from "./modules/auditorio/routes";
 import { staffRouter } from "./modules/staff/routes";
 import { tasksRouter } from "./modules/tasks/routes";
 import { initializeWebSocket, getWebSocketServer } from "./lib/websocket";
-import { requireAuthToken } from "./lib/auth";
+import { requireAdminOrMonitorRole, requireAuthToken } from "./lib/auth";
 
 const app = express();
 const httpServer = createServer(app);
@@ -117,9 +117,9 @@ app.use("/api", (req, res, next) => {
 });
 
 app.use("/api/schedules", schedulesRouter);
-app.use("/api/auditorio", auditorioRouter);
+app.use("/api/auditorio", requireAdminOrMonitorRole, auditorioRouter);
 app.use("/api/staff", staffRouter);
-app.use("/api/tasks", tasksRouter);
+app.use("/api/tasks", requireAdminOrMonitorRole, tasksRouter);
 
 app.use((error: unknown, _req: express.Request, res: express.Response, _next: express.NextFunction) => {
   const message = error instanceof Error ? error.message : "Error interno del servidor";
