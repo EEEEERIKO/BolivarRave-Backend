@@ -1,7 +1,7 @@
 import { Router } from "express";
 import multer from "multer";
 import { z } from "zod";
-import { requireAdminRole } from "../../lib/auth";
+import { requireAdminRole, requireAuthToken } from "../../lib/auth";
 import { parseScheduleWorkbook } from "./parser";
 import { ParsedScheduleRow } from "./types";
 import { broadcastScheduleRefresh } from "../../lib/websocket";
@@ -639,7 +639,7 @@ schedulesRouter.get("/rooms/available", async (req, res, next) => {
   }
 });
 
-schedulesRouter.get("/imports-history", requireAdminRole, async (_req, res, next) => {
+schedulesRouter.get("/imports-history", requireAuthToken, async (_req, res, next) => {
   try {
     const imports = await getImportsHistory();
     return res.json({ imports });

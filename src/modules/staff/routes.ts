@@ -1,7 +1,7 @@
 import { Router } from "express";
 import { z } from "zod";
 import { broadcastScheduleRefresh } from "../../lib/websocket";
-import { type AuthenticatedRequest, signAuthToken } from "../../lib/auth";
+import { type AuthenticatedRequest, requireAdminRole, signAuthToken } from "../../lib/auth";
 import {
   authenticateStaffLogin,
   changeStaffPassword,
@@ -27,9 +27,6 @@ import {
   upsertStaffResumenContrato,
   type StaffEstado,
 } from "./service";
-
-const ADMIN_API_KEY = (process.env.ADMIN_API_KEY ?? "").trim();
-const isProduction = process.env.NODE_ENV === "production";
 
 const dateRegex = /^\d{4}-\d{2}-\d{2}$/;
 const timeRegex = /^\d{2}:\d{2}$/;
@@ -114,26 +111,6 @@ const changePasswordBodySchema = z.object({
   currentPassword: z.string().min(1).max(128),
   newPassword: z.string().min(8).max(128),
 });
-
-const requireAdminKey: import("express").RequestHandler = (req, res, next) => {
-  if (!isProduction) {
-    return next();
-  }
-
-  if (!ADMIN_API_KEY) {
-    return res.status(503).json({ error: "ADMIN_API_KEY no configurada en backend" });
-  }
-
-  const fromHeader = (req.header("x-admin-key") ?? "").trim();
-  const fromBearer = (req.header("authorization") ?? "").replace(/^Bearer\s+/i, "").trim();
-  const provided = fromHeader || fromBearer;
-
-  if (!provided || provided !== ADMIN_API_KEY) {
-    return res.status(401).json({ error: "No autorizado" });
-  }
-
-  return next();
-};
 
 const toLocalDate = (isoDate: string) => {
   const [y, m, d] = isoDate.split("-").map(Number);
@@ -422,7 +399,7 @@ staffRouter.get("/:id", async (req, res, next) => {
   }
 });
 
-staffRouter.post("/", requireAdminKey, async (req, res, next) => {
+staffRouter.post("/", requireAdminRole, async (req, res, next) => {
   try {
     const parsed = createStaffBodySchema.parse(req.body);
     validateBloqueosNoOverlap(parsed.bloqueosClase);
@@ -467,7 +444,7 @@ staffRouter.post("/", requireAdminKey, async (req, res, next) => {
   }
 });
 
-staffRouter.put("/:id", requireAdminKey, async (req, res, next) => {
+staffRouter.put("/:id", requireAdminRole, async (req, res, next) => {
   try {
     const { id } = idParamsSchema.parse(req.params);
     const parsed = updateStaffBodySchema.parse(req.body);
@@ -514,7 +491,7 @@ staffRouter.put("/:id", requireAdminKey, async (req, res, next) => {
   }
 });
 
-staffRouter.patch("/:id/estado", requireAdminKey, async (req, res, next) => {
+staffRouter.patch("/:id/estado", requireAdminRole, async (req, res, next) => {
   try {
     const { id } = idParamsSchema.parse(req.params);
     const { estado } = patchEstadoBodySchema.parse(req.body);
@@ -542,7 +519,7 @@ staffRouter.patch("/:id/estado", requireAdminKey, async (req, res, next) => {
   }
 });
 
-staffRouter.delete("/:id", requireAdminKey, async (req, res, next) => {
+staffRouter.delete("/:id", requireAdminRole, async (req, res, next) => {
   try {
     const { id } = idParamsSchema.parse(req.params);
 
@@ -589,7 +566,7 @@ staffRouter.get("/:id/jornada-semanal", async (req, res, next) => {
   }
 });
 
-staffRouter.put("/:id/jornada-semanal", requireAdminKey, async (req, res, next) => {
+staffRouter.put("/:id/jornada-semanal", requireAdminRole, async (req, res, next) => {
   try {
     const { id } = idParamsSchema.parse(req.params);
     const parsed = replaceJornadaBodySchema.parse(req.body);
@@ -637,7 +614,7 @@ staffRouter.get("/:id/pausas-programadas", async (req, res, next) => {
   }
 });
 
-staffRouter.post("/:id/pausas-programadas", requireAdminKey, async (req, res, next) => {
+staffRouter.post("/:id/pausas-programadas", requireAdminRole, async (req, res, next) => {
   try {
     const { id } = idParamsSchema.parse(req.params);
     const parsed = pausaBodySchema.parse(req.body);
@@ -664,7 +641,7 @@ staffRouter.post("/:id/pausas-programadas", requireAdminKey, async (req, res, ne
   }
 });
 
-staffRouter.put("/:id/pausas-programadas/:pausaId", requireAdminKey, async (req, res, next) => {
+staffRouter.put("/:id/pausas-programadas/:pausaId", requireAdminRole, async (req, res, next) => {
   try {
     const { id, pausaId } = z.object({
       id: z.string().uuid(),
@@ -694,7 +671,7 @@ staffRouter.put("/:id/pausas-programadas/:pausaId", requireAdminKey, async (req,
   }
 });
 
-staffRouter.delete("/:id/pausas-programadas/:pausaId", requireAdminKey, async (req, res, next) => {
+staffRouter.delete("/:id/pausas-programadas/:pausaId", requireAdminRole, async (req, res, next) => {
   try {
     const { id, pausaId } = z.object({
       id: z.string().uuid(),
@@ -743,7 +720,7 @@ staffRouter.get("/:id/resumen-contrato", async (req, res, next) => {
   }
 });
 
-staffRouter.put("/:id/resumen-contrato", requireAdminKey, async (req, res, next) => {
+staffRouter.put("/:id/resumen-contrato", requireAdminRole, async (req, res, next) => {
   try {
     const { id } = idParamsSchema.parse(req.params);
     const parsed = resumenContratoBodySchema.parse(req.body);
