@@ -8,6 +8,7 @@ import { auditorioRouter } from "./modules/auditorio/routes";
 import { staffRouter } from "./modules/staff/routes";
 import { tasksRouter } from "./modules/tasks/routes";
 import { initializeWebSocket, getWebSocketServer } from "./lib/websocket";
+import { requireAuthToken } from "./lib/auth";
 
 const app = express();
 const httpServer = createServer(app);
@@ -95,6 +96,24 @@ app.get("/api/ws-status", (_req, res) => {
     wsConnected: wsServer?.engine?.clientsCount ?? 0,
     timestamp: new Date().toISOString(),
   });
+});
+
+const PUBLIC_API_PATHS = new Set([
+  "/health",
+  "/ws-status",
+  "/staff/login",
+]);
+
+app.use("/api", (req, res, next) => {
+  if (req.method === "OPTIONS") {
+    return next();
+  }
+
+  if (PUBLIC_API_PATHS.has(req.path)) {
+    return next();
+  }
+
+  return requireAuthToken(req, res, next);
 });
 
 app.use("/api/schedules", schedulesRouter);

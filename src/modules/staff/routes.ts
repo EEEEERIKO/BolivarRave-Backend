@@ -1,8 +1,10 @@
 import { Router } from "express";
 import { z } from "zod";
 import { broadcastScheduleRefresh } from "../../lib/websocket";
+import { type AuthenticatedRequest, signAuthToken } from "../../lib/auth";
 import {
   authenticateStaffLogin,
+  changeStaffPassword,
   createStaffPausaProgramada,
   createStaff,
   deleteStaffPausaProgramada,
@@ -105,6 +107,12 @@ const loginBodySchema = z.object({
   cedula: z.string().trim().min(5).max(20),
   portal: z.enum(["admin-monitor", "colaborador"]),
   password: z.string().min(1).max(128).optional(),
+});
+
+const changePasswordBodySchema = z.object({
+  cedula: z.string().trim().min(5).max(20),
+  currentPassword: z.string().min(1).max(128),
+  newPassword: z.string().min(8).max(128),
 });
 
 const requireAdminKey: import("express").RequestHandler = (req, res, next) => {
@@ -329,7 +337,55 @@ staffRouter.post("/login", async (req, res, next) => {
       ...(parsed.password ? { password: parsed.password } : {}),
     });
 
-    return res.json({ session });
+    const accessToken = signAuthToken({
+      staffId: session.staffId,
+      cedula: session.cedula,
+      role: session.role,
+      roleLabel: session.roleLabel,
+      name: session.name,
+    });
+
+    return res.json({
+      session: {
+        ...session,
+        accessToken,
+      },
+    });
+  } catch (error) {
+    if (error instanceof z.ZodError) {
+      return res.status(400).json({
+        error: `Payload invalido: ${error.issues[0]?.message ?? "error de validacion"}`,
+      });
+    }
+
+    if (error instanceof StaffAuthError) {
+      return res.status(error.status).json({ error: error.message });
+    }
+
+    return next(error);
+  }
+});
+
+staffRouter.post("/change-password", async (req, res, next) => {
+  try {
+    const authUser = (req as AuthenticatedRequest).authUser;
+    if (!authUser) {
+      return res.status(401).json({ error: "No autorizado" });
+    }
+
+    const parsed = changePasswordBodySchema.parse(req.body);
+
+    if (authUser.cedula !== parsed.cedula) {
+      return res.status(403).json({ error: "No puedes actualizar la contraseña de otro usuario." });
+    }
+
+    await changeStaffPassword({
+      cedula: parsed.cedula,
+      currentPassword: parsed.currentPassword,
+      newPassword: parsed.newPassword,
+    });
+
+    return res.json({ message: "Contraseña actualizada correctamente." });
   } catch (error) {
     if (error instanceof z.ZodError) {
       return res.status(400).json({

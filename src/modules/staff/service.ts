@@ -629,6 +629,62 @@ export const authenticateStaffLogin = async (payload: {
   };
 };
 
+export const changeStaffPassword = async (payload: {
+  cedula: string;
+  currentPassword: string;
+  newPassword: string;
+}) => {
+  await ensureStaffSecuritySchemaReady();
+
+  const rows = await prisma.$queryRaw<StaffLoginRawRow[]>`
+    SELECT
+      s.id::text AS id,
+      s.role_id,
+      s.rol,
+      s.nombres,
+      s.apellidos,
+      s.cedula,
+      s.estado,
+      c.password_hash
+    FROM public.staff s
+    LEFT JOIN public.staff_credentials c ON c.staff_id = s.id
+    WHERE s.cedula = ${payload.cedula}
+    LIMIT 1
+  `;
+
+  const staff = rows[0];
+  if (!staff) {
+    throw new StaffAuthError("Usuario no encontrado para actualizar contraseña.", 404);
+  }
+
+  if (staff.estado !== "Active") {
+    throw new StaffAuthError("La cuenta se encuentra inactiva. Contacta al administrador.", 403);
+  }
+
+  if (!CREDENTIAL_REQUIRED_ROLE_IDS.has(staff.role_id)) {
+    throw new StaffAuthError("Este usuario no usa contraseña para iniciar sesión en este portal.", 400);
+  }
+
+  if (!staff.password_hash) {
+    throw new StaffAuthError("No hay credenciales registradas para este usuario.", 403);
+  }
+
+  const isCurrentPasswordValid = await verifyPasswordHash(payload.currentPassword, staff.password_hash);
+  if (!isCurrentPasswordValid) {
+    throw new StaffAuthError("La contraseña actual no es correcta.", 401);
+  }
+
+  if (payload.currentPassword === payload.newPassword) {
+    throw new StaffAuthError("La nueva contraseña debe ser diferente a la actual.", 400);
+  }
+
+  await prisma.$transaction(async (tx) => {
+    await upsertStaffCredential(tx, staff.id, payload.newPassword);
+  }, { timeout: 20000, maxWait: 10000 });
+
+  return { staffId: staff.id };
+};
+
 export const listStaff = async () => {
   await ensureStaffSecuritySchemaReady();
 

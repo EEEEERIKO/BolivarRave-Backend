@@ -131,6 +131,7 @@ type RoomsInfoRawRow = {
   nombre_principal: string | null;
   responsable: string | null;
   codigo_materia: string | null;
+  facultad_nombre: string | null;
   actividad: string | null;
 };
 
@@ -705,6 +706,7 @@ schedulesRouter.get("/rooms-info", async (_req, res, next) => {
         e.nombre_principal,
         e.responsable,
         e.codigo_materia,
+        f.nombre AS facultad_nombre,
         e.actividad
       FROM public.salones s
       LEFT JOIN public.horarios_evento h
@@ -716,6 +718,7 @@ schedulesRouter.get("/rooms-info", async (_req, res, next) => {
             AND ${today}::date BETWEEN e2.fecha_inicio AND e2.fecha_fin
         )
       LEFT JOIN public.eventos e ON e.id = h.evento_id
+      LEFT JOIN public.facultades f ON f.id = e.facultad_id
       ORDER BY
         s.piso DESC NULLS LAST,
         s.nombre_bloque ASC,
@@ -736,6 +739,7 @@ schedulesRouter.get("/rooms-info", async (_req, res, next) => {
           nombrePrincipal: string | null;
           responsable: string | null;
           codigoMateria: string | null;
+          facultad: string | null;
           actividad: string | null;
         };
       }>;
@@ -784,6 +788,7 @@ schedulesRouter.get("/rooms-info", async (_req, res, next) => {
                 nombrePrincipal: salon.nombre_principal,
                 responsable: salon.responsable,
                 codigoMateria: salon.codigo_materia,
+                facultad: salon.facultad_nombre,
                 actividad: salon.actividad,
               },
             });
