@@ -1,6 +1,7 @@
 import { Router } from "express";
 import multer from "multer";
 import { z } from "zod";
+import { requireAdminRole, requireAuthToken } from "../../lib/auth";
 import { parseScheduleWorkbook } from "./parser";
 import { ParsedScheduleRow } from "./types";
 import { broadcastScheduleRefresh } from "../../lib/websocket";
@@ -15,9 +16,6 @@ import {
   replaceAllSchedulesFromRows,
   updateScheduleEventSlot,
 } from "./service";
-
-const ADMIN_API_KEY = (process.env.ADMIN_API_KEY ?? "").trim();
-const isProduction = process.env.NODE_ENV === "production";
 
 const upload = multer({
   storage: multer.memoryStorage(),
@@ -131,6 +129,7 @@ type RoomsInfoRawRow = {
   nombre_principal: string | null;
   responsable: string | null;
   codigo_materia: string | null;
+  facultad_nombre: string | null;
   actividad: string | null;
 };
 
@@ -311,30 +310,7 @@ const handleKnownScheduleWriteError = (error: unknown, res: import("express").Re
   return false;
 };
 
-const requireAdminKey: import("express").RequestHandler = (req, res, next) => {
-  // Solo requiere API key en producción
-  if (!isProduction) {
-    return next();
-  }
-
-  if (!ADMIN_API_KEY) {
-    return res.status(503).json({
-      error: "ADMIN_API_KEY no configurada en backend",
-    });
-  }
-
-  const fromHeader = (req.header("x-admin-key") ?? "").trim();
-  const fromBearer = (req.header("authorization") ?? "").replace(/^Bearer\s+/i, "").trim();
-  const provided = fromHeader || fromBearer;
-
-  if (!provided || provided !== ADMIN_API_KEY) {
-    return res.status(401).json({ error: "No autorizado" });
-  }
-
-  return next();
-};
-
-schedulesRouter.post("/import-parsed", requireAdminKey, async (req, res, next) => {
+schedulesRouter.post("/import-parsed", requireAdminRole, async (req, res, next) => {
   try {
     const parsed = parsedImportSchema.parse(req.body);
 
@@ -406,7 +382,7 @@ schedulesRouter.post("/import-parsed", requireAdminKey, async (req, res, next) =
   }
 });
 
-schedulesRouter.post("/import", requireAdminKey, upload.single("file"), async (req, res, next) => {
+schedulesRouter.post("/import", requireAdminRole, upload.single("file"), async (req, res, next) => {
   try {
     if (!req.file) {
       return res.status(400).json({ error: "Debes enviar un archivo en el campo 'file'" });
@@ -479,7 +455,7 @@ schedulesRouter.get("/events", async (_req, res, next) => {
   }
 });
 
-schedulesRouter.post("/events", requireAdminKey, async (req, res, next) => {
+schedulesRouter.post("/events", requireAdminRole, async (req, res, next) => {
   let parsedPayload: z.infer<typeof createEventSchema> | null = null;
 
   try {
@@ -541,7 +517,7 @@ schedulesRouter.post("/events", requireAdminKey, async (req, res, next) => {
   }
 });
 
-schedulesRouter.put("/events/:eventId/:slotId", requireAdminKey, async (req, res, next) => {
+schedulesRouter.put("/events/:eventId/:slotId", requireAdminRole, async (req, res, next) => {
   try {
     const params = eventSlotParamsSchema.parse(req.params);
     const body = updateEventSchema.parse(req.body);
@@ -606,7 +582,7 @@ schedulesRouter.put("/events/:eventId/:slotId", requireAdminKey, async (req, res
   }
 });
 
-schedulesRouter.delete("/events/:eventId/:slotId", requireAdminKey, async (req, res, next) => {
+schedulesRouter.delete("/events/:eventId/:slotId", requireAdminRole, async (req, res, next) => {
   try {
     const params = eventSlotParamsSchema.parse(req.params);
     await deleteScheduleEventSlot(params.eventId, params.slotId);
@@ -663,7 +639,7 @@ schedulesRouter.get("/rooms/available", async (req, res, next) => {
   }
 });
 
-schedulesRouter.get("/imports-history", async (_req, res, next) => {
+schedulesRouter.get("/imports-history", requireAuthToken, async (_req, res, next) => {
   try {
     const imports = await getImportsHistory();
     return res.json({ imports });
@@ -672,7 +648,7 @@ schedulesRouter.get("/imports-history", async (_req, res, next) => {
   }
 });
 
-schedulesRouter.delete("/all", requireAdminKey, async (_req, res, next) => {
+schedulesRouter.delete("/all", requireAdminRole, async (_req, res, next) => {
   try {
     await clearAllSchedules("schedules-ui");
     
@@ -705,6 +681,7 @@ schedulesRouter.get("/rooms-info", async (_req, res, next) => {
         e.nombre_principal,
         e.responsable,
         e.codigo_materia,
+        f.nombre AS facultad_nombre,
         e.actividad
       FROM public.salones s
       LEFT JOIN public.horarios_evento h
@@ -716,6 +693,7 @@ schedulesRouter.get("/rooms-info", async (_req, res, next) => {
             AND ${today}::date BETWEEN e2.fecha_inicio AND e2.fecha_fin
         )
       LEFT JOIN public.eventos e ON e.id = h.evento_id
+      LEFT JOIN public.facultades f ON f.id = e.facultad_id
       ORDER BY
         s.piso DESC NULLS LAST,
         s.nombre_bloque ASC,
@@ -728,6 +706,7 @@ schedulesRouter.get("/rooms-info", async (_req, res, next) => {
       nombre: string;
       piso: number;
       capacidad: number | null;
+      facultad: string | null;
       horarios: Array<{
         diaSemana: string;
         horaInicio: string;
@@ -736,6 +715,7 @@ schedulesRouter.get("/rooms-info", async (_req, res, next) => {
           nombrePrincipal: string | null;
           responsable: string | null;
           codigoMateria: string | null;
+          facultad: string | null;
           actividad: string | null;
         };
       }>;
@@ -761,12 +741,17 @@ schedulesRouter.get("/rooms-info", async (_req, res, next) => {
           nombre: salon.salon_nombre,
           piso: inferredPiso,
           capacidad: salon.salon_capacidad,
+          facultad: salon.facultad_nombre?.trim() || null,
           horarios: [],
         });
       }
 
+      const room = salonesMap.get(salon.salon_id);
+      if (room && salon.facultad_nombre?.trim() && !room.facultad) {
+        room.facultad = salon.facultad_nombre.trim();
+      }
+
       if (salon.dia_semana && salon.hora_inicio && salon.hora_fin) {
-        const room = salonesMap.get(salon.salon_id);
         if (room) {
           const isDuplicateSlot = room.horarios.some(
             (slot) =>
@@ -784,6 +769,7 @@ schedulesRouter.get("/rooms-info", async (_req, res, next) => {
                 nombrePrincipal: salon.nombre_principal,
                 responsable: salon.responsable,
                 codigoMateria: salon.codigo_materia,
+                facultad: salon.facultad_nombre,
                 actividad: salon.actividad,
               },
             });

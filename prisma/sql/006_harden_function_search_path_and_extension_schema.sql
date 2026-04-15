@@ -35,6 +35,17 @@ alter function if exists public.verificar_solape_horario(
 )
   set search_path = public, pg_temp;
 
+alter function if exists public.verificar_solape_horario(
+  uuid,
+  uuid,
+  public.dia_semana_enum,
+  time,
+  time,
+  uuid,
+  date
+)
+  set search_path = public, pg_temp;
+
 alter function if exists public.trg_horarios_evento_no_solape()
   set search_path = public, pg_temp;
 

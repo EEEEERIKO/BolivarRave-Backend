@@ -26,6 +26,7 @@ async function main() {
   const functionAlters = [
     `ALTER FUNCTION public.validar_evento_por_tipo() SET search_path = public, pg_temp`,
     `ALTER FUNCTION public.verificar_solape_horario(uuid, uuid, public.dia_semana_enum, time without time zone, time without time zone, uuid) SET search_path = public, pg_temp`,
+    `ALTER FUNCTION public.verificar_solape_horario(uuid, uuid, public.dia_semana_enum, time without time zone, time without time zone, uuid, date) SET search_path = public, pg_temp`,
     `ALTER FUNCTION public.trg_horarios_evento_no_solape() SET search_path = public, pg_temp`,
     `ALTER FUNCTION public.trg_eventos_revalidar_solape_por_fecha() SET search_path = public, pg_temp`,
   ];
@@ -56,7 +57,7 @@ async function main() {
         'trg_horarios_evento_no_solape',
         'trg_eventos_revalidar_solape_por_fecha'
       ]::text[])
-    ORDER BY p.proname
+    ORDER BY p.proname, pg_get_function_arguments(p.oid)
   `);
 
   const extensionCheck = await prisma.$queryRawUnsafe(`

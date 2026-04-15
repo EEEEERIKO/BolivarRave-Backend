@@ -1,7 +1,10 @@
 import { Router } from "express";
 import { z } from "zod";
 import { broadcastScheduleRefresh } from "../../lib/websocket";
+import { type AuthenticatedRequest, requireAdminRole, signAuthToken } from "../../lib/auth";
 import {
+  authenticateStaffLogin,
+  changeStaffPassword,
   createStaffPausaProgramada,
   createStaff,
   deleteStaffPausaProgramada,
@@ -17,15 +20,13 @@ import {
   listStaffPausasProgramadas,
   listStaff,
   replaceStaffJornadaSemanal,
+  StaffAuthError,
   updateStaffPausaProgramada,
   updateStaff,
   updateStaffEstado,
   upsertStaffResumenContrato,
   type StaffEstado,
 } from "./service";
-
-const ADMIN_API_KEY = (process.env.ADMIN_API_KEY ?? "").trim();
-const isProduction = process.env.NODE_ENV === "production";
 
 const dateRegex = /^\d{4}-\d{2}-\d{2}$/;
 const timeRegex = /^\d{2}:\d{2}$/;
@@ -99,25 +100,17 @@ const resumenContratoBodySchema = z.object({
   balanceHoras: z.number().min(-10000).max(10000),
 });
 
-const requireAdminKey: import("express").RequestHandler = (req, res, next) => {
-  if (!isProduction) {
-    return next();
-  }
+const loginBodySchema = z.object({
+  cedula: z.string().trim().min(5).max(20),
+  portal: z.enum(["admin-monitor", "colaborador"]),
+  password: z.string().min(1).max(128).optional(),
+});
 
-  if (!ADMIN_API_KEY) {
-    return res.status(503).json({ error: "ADMIN_API_KEY no configurada en backend" });
-  }
-
-  const fromHeader = (req.header("x-admin-key") ?? "").trim();
-  const fromBearer = (req.header("authorization") ?? "").replace(/^Bearer\s+/i, "").trim();
-  const provided = fromHeader || fromBearer;
-
-  if (!provided || provided !== ADMIN_API_KEY) {
-    return res.status(401).json({ error: "No autorizado" });
-  }
-
-  return next();
-};
+const changePasswordBodySchema = z.object({
+  cedula: z.string().trim().min(5).max(20),
+  currentPassword: z.string().min(1).max(128),
+  newPassword: z.string().min(8).max(128),
+});
 
 const toLocalDate = (isoDate: string) => {
   const [y, m, d] = isoDate.split("-").map(Number);
@@ -257,8 +250,35 @@ const handleKnownStaffScheduleError = (error: unknown, res: import("express").Re
   return false;
 };
 
-staffRouter.get("/", async (_req, res, next) => {
+const ensureCollaboradorSelfAccess = (
+  req: import("express").Request,
+  res: import("express").Response,
+  targetStaffId: string,
+) => {
+  const authUser = (req as AuthenticatedRequest).authUser;
+
+  if (!authUser) {
+    res.status(401).json({ error: "No autorizado" });
+    return false;
+  }
+
+  if (authUser.role === "colaborador" && authUser.staffId !== targetStaffId) {
+    res.status(403).json({ error: "Solo puedes consultar tu propio perfil." });
+    return false;
+  }
+
+  return true;
+};
+
+staffRouter.get("/", async (req, res, next) => {
   try {
+    const authUser = (req as AuthenticatedRequest).authUser;
+
+    if (authUser?.role === "colaborador") {
+      const ownStaff = await getStaffById(authUser.staffId);
+      return res.json({ staff: ownStaff ? [ownStaff] : [] });
+    }
+
     const staff = await listStaff();
     return res.json({ staff });
   } catch (error) {
@@ -266,8 +286,15 @@ staffRouter.get("/", async (_req, res, next) => {
   }
 });
 
-staffRouter.get("/jornadas-semanales", async (_req, res, next) => {
+staffRouter.get("/jornadas-semanales", async (req, res, next) => {
   try {
+    const authUser = (req as AuthenticatedRequest).authUser;
+
+    if (authUser?.role === "colaborador") {
+      const ownJornadas = await listStaffJornadaSemanal(authUser.staffId);
+      return res.json({ jornadasByStaffId: { [authUser.staffId]: ownJornadas } });
+    }
+
     const jornadasByStaffId = await listAllStaffJornadasSemanales();
     return res.json({ jornadasByStaffId });
   } catch (error) {
@@ -293,8 +320,15 @@ staffRouter.get("/skills", async (_req, res, next) => {
   }
 });
 
-staffRouter.get("/jornadas-bulk", async (_req, res, next) => {
+staffRouter.get("/jornadas-bulk", async (req, res, next) => {
   try {
+    const authUser = (req as AuthenticatedRequest).authUser;
+
+    if (authUser?.role === "colaborador") {
+      const ownJornadas = await listStaffJornadaSemanal(authUser.staffId);
+      return res.json({ jornadas: { [authUser.staffId]: ownJornadas } });
+    }
+
     const jornadasByStaffId = await listAllStaffJornadasSemanales();
     return res.json({ jornadas: jornadasByStaffId });
   } catch (error) {
@@ -302,8 +336,15 @@ staffRouter.get("/jornadas-bulk", async (_req, res, next) => {
   }
 });
 
-staffRouter.get("/pausas-bulk", async (_req, res, next) => {
+staffRouter.get("/pausas-bulk", async (req, res, next) => {
   try {
+    const authUser = (req as AuthenticatedRequest).authUser;
+
+    if (authUser?.role === "colaborador") {
+      const ownPausas = await listStaffPausasProgramadas(authUser.staffId);
+      return res.json({ pausas: { [authUser.staffId]: ownPausas } });
+    }
+
     const pausasByStaffId = await listAllStaffPausasProgramadas();
     return res.json({ pausas: pausasByStaffId });
   } catch (error) {
@@ -311,9 +352,88 @@ staffRouter.get("/pausas-bulk", async (_req, res, next) => {
   }
 });
 
+staffRouter.post("/login", async (req, res, next) => {
+  try {
+    const parsed = loginBodySchema.parse(req.body);
+
+    const session = await authenticateStaffLogin({
+      cedula: parsed.cedula,
+      portal: parsed.portal,
+      ...(parsed.password ? { password: parsed.password } : {}),
+    });
+
+    const accessToken = signAuthToken({
+      staffId: session.staffId,
+      cedula: session.cedula,
+      role: session.role,
+      roleLabel: session.roleLabel,
+      name: session.name,
+    });
+
+    return res.json({
+      session: {
+        ...session,
+        accessToken,
+      },
+    });
+  } catch (error) {
+    if (error instanceof z.ZodError) {
+      return res.status(400).json({
+        error: `Payload invalido: ${error.issues[0]?.message ?? "error de validacion"}`,
+      });
+    }
+
+    if (error instanceof StaffAuthError) {
+      return res.status(error.status).json({ error: error.message });
+    }
+
+    return next(error);
+  }
+});
+
+staffRouter.post("/change-password", async (req, res, next) => {
+  try {
+    const authUser = (req as AuthenticatedRequest).authUser;
+    if (!authUser) {
+      return res.status(401).json({ error: "No autorizado" });
+    }
+
+    const parsed = changePasswordBodySchema.parse(req.body);
+
+    if (authUser.cedula !== parsed.cedula) {
+      return res.status(403).json({ error: "No puedes actualizar la contraseña de otro usuario." });
+    }
+
+    await changeStaffPassword({
+      cedula: parsed.cedula,
+      currentPassword: parsed.currentPassword,
+      newPassword: parsed.newPassword,
+    });
+
+    return res.json({ message: "Contraseña actualizada correctamente." });
+  } catch (error) {
+    if (error instanceof z.ZodError) {
+      return res.status(400).json({
+        error: `Payload invalido: ${error.issues[0]?.message ?? "error de validacion"}`,
+      });
+    }
+
+    if (error instanceof StaffAuthError) {
+      return res.status(error.status).json({ error: error.message });
+    }
+
+    return next(error);
+  }
+});
+
 staffRouter.get("/:id", async (req, res, next) => {
   try {
     const { id } = idParamsSchema.parse(req.params);
+
+    if (!ensureCollaboradorSelfAccess(req, res, id)) {
+      return;
+    }
+
     const staff = await getStaffById(id);
 
     if (!staff) {
@@ -332,7 +452,7 @@ staffRouter.get("/:id", async (req, res, next) => {
   }
 });
 
-staffRouter.post("/", requireAdminKey, async (req, res, next) => {
+staffRouter.post("/", requireAdminRole, async (req, res, next) => {
   try {
     const parsed = createStaffBodySchema.parse(req.body);
     validateBloqueosNoOverlap(parsed.bloqueosClase);
@@ -377,7 +497,7 @@ staffRouter.post("/", requireAdminKey, async (req, res, next) => {
   }
 });
 
-staffRouter.put("/:id", requireAdminKey, async (req, res, next) => {
+staffRouter.put("/:id", requireAdminRole, async (req, res, next) => {
   try {
     const { id } = idParamsSchema.parse(req.params);
     const parsed = updateStaffBodySchema.parse(req.body);
@@ -424,7 +544,7 @@ staffRouter.put("/:id", requireAdminKey, async (req, res, next) => {
   }
 });
 
-staffRouter.patch("/:id/estado", requireAdminKey, async (req, res, next) => {
+staffRouter.patch("/:id/estado", requireAdminRole, async (req, res, next) => {
   try {
     const { id } = idParamsSchema.parse(req.params);
     const { estado } = patchEstadoBodySchema.parse(req.body);
@@ -452,7 +572,7 @@ staffRouter.patch("/:id/estado", requireAdminKey, async (req, res, next) => {
   }
 });
 
-staffRouter.delete("/:id", requireAdminKey, async (req, res, next) => {
+staffRouter.delete("/:id", requireAdminRole, async (req, res, next) => {
   try {
     const { id } = idParamsSchema.parse(req.params);
 
@@ -482,6 +602,11 @@ staffRouter.delete("/:id", requireAdminKey, async (req, res, next) => {
 staffRouter.get("/:id/jornada-semanal", async (req, res, next) => {
   try {
     const { id } = idParamsSchema.parse(req.params);
+
+    if (!ensureCollaboradorSelfAccess(req, res, id)) {
+      return;
+    }
+
     const jornadas = await listStaffJornadaSemanal(id);
     return res.json({ jornadas });
   } catch (error) {
@@ -499,7 +624,7 @@ staffRouter.get("/:id/jornada-semanal", async (req, res, next) => {
   }
 });
 
-staffRouter.put("/:id/jornada-semanal", requireAdminKey, async (req, res, next) => {
+staffRouter.put("/:id/jornada-semanal", requireAdminRole, async (req, res, next) => {
   try {
     const { id } = idParamsSchema.parse(req.params);
     const parsed = replaceJornadaBodySchema.parse(req.body);
@@ -530,6 +655,11 @@ staffRouter.put("/:id/jornada-semanal", requireAdminKey, async (req, res, next) 
 staffRouter.get("/:id/pausas-programadas", async (req, res, next) => {
   try {
     const { id } = idParamsSchema.parse(req.params);
+
+    if (!ensureCollaboradorSelfAccess(req, res, id)) {
+      return;
+    }
+
     const pausas = await listStaffPausasProgramadas(id);
     return res.json({ pausas });
   } catch (error) {
@@ -547,7 +677,7 @@ staffRouter.get("/:id/pausas-programadas", async (req, res, next) => {
   }
 });
 
-staffRouter.post("/:id/pausas-programadas", requireAdminKey, async (req, res, next) => {
+staffRouter.post("/:id/pausas-programadas", requireAdminRole, async (req, res, next) => {
   try {
     const { id } = idParamsSchema.parse(req.params);
     const parsed = pausaBodySchema.parse(req.body);
@@ -574,7 +704,7 @@ staffRouter.post("/:id/pausas-programadas", requireAdminKey, async (req, res, ne
   }
 });
 
-staffRouter.put("/:id/pausas-programadas/:pausaId", requireAdminKey, async (req, res, next) => {
+staffRouter.put("/:id/pausas-programadas/:pausaId", requireAdminRole, async (req, res, next) => {
   try {
     const { id, pausaId } = z.object({
       id: z.string().uuid(),
@@ -604,7 +734,7 @@ staffRouter.put("/:id/pausas-programadas/:pausaId", requireAdminKey, async (req,
   }
 });
 
-staffRouter.delete("/:id/pausas-programadas/:pausaId", requireAdminKey, async (req, res, next) => {
+staffRouter.delete("/:id/pausas-programadas/:pausaId", requireAdminRole, async (req, res, next) => {
   try {
     const { id, pausaId } = z.object({
       id: z.string().uuid(),
@@ -636,6 +766,11 @@ staffRouter.delete("/:id/pausas-programadas/:pausaId", requireAdminKey, async (r
 staffRouter.get("/:id/resumen-contrato", async (req, res, next) => {
   try {
     const { id } = idParamsSchema.parse(req.params);
+
+    if (!ensureCollaboradorSelfAccess(req, res, id)) {
+      return;
+    }
+
     const resumen = await getStaffResumenContrato(id);
     return res.json({ resumen });
   } catch (error) {
@@ -653,7 +788,7 @@ staffRouter.get("/:id/resumen-contrato", async (req, res, next) => {
   }
 });
 
-staffRouter.put("/:id/resumen-contrato", requireAdminKey, async (req, res, next) => {
+staffRouter.put("/:id/resumen-contrato", requireAdminRole, async (req, res, next) => {
   try {
     const { id } = idParamsSchema.parse(req.params);
     const parsed = resumenContratoBodySchema.parse(req.body);
@@ -683,6 +818,11 @@ staffRouter.put("/:id/resumen-contrato", requireAdminKey, async (req, res, next)
 staffRouter.get("/:id/horario-laboral", async (req, res, next) => {
   try {
     const { id } = idParamsSchema.parse(req.params);
+
+    if (!ensureCollaboradorSelfAccess(req, res, id)) {
+      return;
+    }
+
     const horarioLaboral = await getStaffHorarioLaboral(id);
     return res.json({ horarioLaboral });
   } catch (error) {

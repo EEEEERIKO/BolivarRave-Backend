@@ -13,6 +13,7 @@ Run only:
 - [011_tareas_schema.sql](011_tareas_schema.sql)
 - [012_staff_horario_laboral_schema.sql](012_staff_horario_laboral_schema.sql)
 - [013_auditorio_requerimientos_extra.sql](013_auditorio_requerimientos_extra.sql)
+- [014_enable_rls_for_staff_tasks_auditorio.sql](014_enable_rls_for_staff_tasks_auditorio.sql)
 
 This single file creates:
 
@@ -69,6 +70,12 @@ And [013_auditorio_requerimientos_extra.sql](013_auditorio_requerimientos_extra.
 - `reservas_auditorio.requiere_proyector`
 - `reservas_auditorio.requiere_filtro_agua`
 
+And [014_enable_rls_for_staff_tasks_auditorio.sql](014_enable_rls_for_staff_tasks_auditorio.sql) applies:
+
+- RLS enablement for auditorio/staff/tareas tables created after base migration
+- direct privilege revocation for `anon` and `authenticated`
+- `service_role_all_access` policy creation for `service_role`
+
 ## What each existing SQL file is for
 
 - [001_schedule_safety_constraints.sql](001_schedule_safety_constraints.sql): Legacy safety constraints for old Prisma schedule tables (`ClassSlot`). Not needed for current reservas schema.
@@ -79,17 +86,23 @@ And [013_auditorio_requerimientos_extra.sql](013_auditorio_requerimientos_extra.
 - [004_merge_duplicate_rooms.sql](004_merge_duplicate_rooms.sql): One-time data repair script to merge duplicate room names.
 - [005_enable_rls_public_tables.sql](005_enable_rls_public_tables.sql): RLS hardening patch for Supabase exposure.
 - [006_harden_function_search_path_and_extension_schema.sql](006_harden_function_search_path_and_extension_schema.sql): Supabase linter patch (`function_search_path_mutable`, `extension_in_public`).
+- [014_enable_rls_for_staff_tasks_auditorio.sql](014_enable_rls_for_staff_tasks_auditorio.sql): RLS patch for auditorio/staff/tareas and related public tables.
 
 ## Practical execution paths
 
 1. Clean new server (recommended):
    - Execute [007_portable_full_migration.sql](007_portable_full_migration.sql)
    - Execute [008_auditorio_reservas_schema.sql](008_auditorio_reservas_schema.sql)
+   - Execute [009_staff_schema.sql](009_staff_schema.sql)
+   - Execute [010_staff_role_id.sql](010_staff_role_id.sql)
+   - Execute [011_tareas_schema.sql](011_tareas_schema.sql)
+   - Execute [012_staff_horario_laboral_schema.sql](012_staff_horario_laboral_schema.sql)
    - Execute [013_auditorio_requerimientos_extra.sql](013_auditorio_requerimientos_extra.sql)
+   - Execute [014_enable_rls_for_staff_tasks_auditorio.sql](014_enable_rls_for_staff_tasks_auditorio.sql)
 
 2. Existing Supabase DB with data already loaded:
    - Keep historical files for audit only.
-   - Apply only patch files when needed (`005`, `006`) or run `007` carefully in a maintenance window after backup.
+   - Apply patch files when needed (`005`, `006`, `014`) or run `007` carefully in a maintenance window after backup.
 
 ## Notes
 
