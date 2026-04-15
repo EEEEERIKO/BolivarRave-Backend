@@ -78,7 +78,7 @@ app.use(
   })
 );
 
-app.use(express.json({ limit: "2mb" }));
+app.use(express.json({ limit: "10mb" }));
 
 app.get("/api/health", (_req, res) => {
   res.json({ ok: true, service: "unac-bolivar-horarios-backend" });
@@ -123,9 +123,22 @@ app.use("/api/tasks", tasksRouter);
 
 app.use((error: unknown, _req: express.Request, res: express.Response, _next: express.NextFunction) => {
   const message = error instanceof Error ? error.message : "Error interno del servidor";
+  const statusFromError =
+    typeof error === "object" && error !== null && "status" in error && typeof (error as { status?: unknown }).status === "number"
+      ? (error as { status: number }).status
+      : null;
+  const typeFromError =
+    typeof error === "object" && error !== null && "type" in error && typeof (error as { type?: unknown }).type === "string"
+      ? (error as { type: string }).type
+      : null;
 
   if (message.toLowerCase().includes("cors")) {
     res.status(403).json({ error: "Solicitud bloqueada por politica de seguridad CORS" });
+    return;
+  }
+
+  if (statusFromError === 413 || typeFromError === "entity.too.large") {
+    res.status(413).json({ error: "El archivo es demasiado grande para procesarlo. Reduce la cantidad de filas e intenta nuevamente." });
     return;
   }
 

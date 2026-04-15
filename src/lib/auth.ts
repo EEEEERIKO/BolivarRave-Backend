@@ -1,3 +1,4 @@
+import "dotenv/config";
 import type { RequestHandler } from "express";
 import jwt from "jsonwebtoken";
 
@@ -74,4 +75,18 @@ export const requireAuthToken: RequestHandler = (req, res, next) => {
   } catch {
     return res.status(401).json({ error: "Sesion invalida o expirada" });
   }
+};
+
+export const requireAdminRole: RequestHandler = (req, res, next) => {
+  const authUser = (req as AuthenticatedRequest).authUser;
+
+  if (!authUser) {
+    return res.status(401).json({ error: "No autorizado" });
+  }
+
+  if (authUser.role !== "admin") {
+    return res.status(403).json({ error: "Solo el perfil Administrador puede realizar esta acción." });
+  }
+
+  return next();
 };
