@@ -56,6 +56,11 @@ And [011_tareas_schema.sql](011_tareas_schema.sql) creates:
 - review traceability fields in assignments (`monitor_id`, `fecha_revision`, `observaciones_revision`)
 - review/rework states in `tarea_estado_enum` (`En Revision`, `Rechazada`, `Corregir`)
 
+And [015_schedule_requests_schema.sql](015_schedule_requests_schema.sql) creates:
+
+- `solicitudes_salon`
+- estados de solicitud para reservas de horario (`pendiente`, `aprobada`, `rechazada`)
+
 And [012_staff_horario_laboral_schema.sql](012_staff_horario_laboral_schema.sql) creates:
 
 - `staff_jornada_semanal` (weekly working skeleton by day and entry/exit times)
