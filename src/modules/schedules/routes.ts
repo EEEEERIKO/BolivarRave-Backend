@@ -1,7 +1,7 @@
 import { Router } from "express";
 import multer from "multer";
 import { z } from "zod";
-import { requireAdminRole, requireAuthToken } from "../../lib/auth";
+import { requireAdminOrMonitorRole, requireAdminRole, requireAuthToken, type AuthenticatedRequest } from "../../lib/auth";
 import { parseScheduleWorkbook } from "./parser";
 import { ParsedScheduleRow } from "./types";
 import { broadcastScheduleRefresh } from "../../lib/websocket";
@@ -13,7 +13,9 @@ import {
   getImportsHistory,
   getRooms,
   getScheduleEvents,
+  getPendingScheduleRequests,
   replaceAllSchedulesFromRows,
+  updateScheduleRequestStatus,
   updateScheduleEventSlot,
 } from "./service";
 
@@ -116,6 +118,10 @@ const availableRoomsQuerySchema = z.object({
   start: z.string().regex(/^\d{2}:\d{2}$/),
   end: z.string().regex(/^\d{2}:\d{2}$/),
   capacity: z.coerce.number().int().min(1).max(1000),
+});
+
+const requestStatusSchema = z.object({
+  status: z.enum(["aprobada", "rechazada"]),
 });
 
 type RoomsInfoRawRow = {
@@ -459,6 +465,10 @@ schedulesRouter.post("/events", requireAdminRole, async (req, res, next) => {
   let parsedPayload: z.infer<typeof createEventSchema> | null = null;
 
   try {
+    const authUser = (req as AuthenticatedRequest).authUser;
+    if (!authUser) {
+      return res.status(401).json({ error: "No autorizado" });
+    }
     const parsed = createEventSchema.parse(req.body);
     parsedPayload = parsed;
 
@@ -476,6 +486,10 @@ schedulesRouter.post("/events", requireAdminRole, async (req, res, next) => {
         startTime: slot.start,
         endTime: slot.end,
       })),
+      requestStatus: "aprobada",
+      requestedByStaffId: authUser.staffId,
+      requestedByName: authUser.name,
+      requestedByRole: authUser.role,
     });
 
     // Notificar sobre nuevo evento
@@ -511,6 +525,96 @@ schedulesRouter.post("/events", requireAdminRole, async (req, res, next) => {
 
     if (handleKnownScheduleWriteError(error, res)) {
       return;
+    }
+
+    return next(error);
+  }
+});
+
+schedulesRouter.post("/requests", requireAdminOrMonitorRole, async (req, res, next) => {
+  try {
+    const authUser = (req as AuthenticatedRequest).authUser;
+    if (!authUser) {
+      return res.status(401).json({ error: "No autorizado" });
+    }
+    const parsed = createEventSchema.parse(req.body);
+
+    if (parsed.slots.length !== 1) {
+      return res.status(400).json({
+        error: "Las solicitudes de salón deben enviarse con un único horario.",
+      });
+    }
+
+    const created = await createScheduleEvent({
+      reservationType: parsed.reservationType,
+      faculty: parsed.faculty,
+      code: parsed.code,
+      subject: parsed.subject,
+      teacher: parsed.teacher,
+      startDate: toLocalDate(parsed.startDate),
+      endDate: toLocalDate(parsed.endDate),
+      slots: parsed.slots.map((slot) => ({
+        day: slot.day,
+        room: slot.room,
+        startTime: slot.start,
+        endTime: slot.end,
+      })),
+      requestStatus: "pendiente",
+      requestedByStaffId: authUser.staffId,
+      requestedByName: authUser.name,
+      requestedByRole: authUser.role,
+    });
+
+    broadcastScheduleRefresh();
+
+    return res.status(201).json({ message: "Solicitud enviada correctamente", eventId: created.eventId });
+  } catch (error) {
+    if (error instanceof z.ZodError) {
+      return res.status(400).json({
+        error: `Payload de solicitud invalido: ${error.issues[0]?.message ?? "error de validacion"}`,
+      });
+    }
+
+    if (handleKnownScheduleWriteError(error, res)) {
+      return;
+    }
+
+    return next(error);
+  }
+});
+
+schedulesRouter.get("/requests", requireAdminRole, async (_req, res, next) => {
+  try {
+    const requests = await getPendingScheduleRequests();
+    return res.json({ requests });
+  } catch (error) {
+    return next(error);
+  }
+});
+
+schedulesRouter.patch("/requests/:requestId/status", requireAdminRole, async (req, res, next) => {
+  try {
+    const params = z.object({ requestId: z.string().uuid() }).parse(req.params);
+    const body = requestStatusSchema.parse(req.body);
+    const authUser = (req as AuthenticatedRequest).authUser;
+    if (!authUser) {
+      return res.status(401).json({ error: "No autorizado" });
+    }
+
+    await updateScheduleRequestStatus(params.requestId, body.status, {
+      staffId: authUser.staffId,
+      name: authUser.name,
+      role: authUser.role,
+    });
+
+    broadcastScheduleRefresh();
+
+    return res.json({ message: body.status === "aprobada" ? "Solicitud aprobada" : "Solicitud rechazada" });
+  } catch (error) {
+    if (error instanceof z.ZodError) {
+      return res.status(400).json({
+        error: `Solicitud invalida: ${error.issues[0]?.message ?? "error de validacion"}`,
+      });
     }
 
     return next(error);

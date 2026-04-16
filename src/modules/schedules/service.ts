@@ -11,6 +11,8 @@ type ImportMeta = {
 
 type ReservationTypeKey = "normal" | "momentanea" | "iglesia";
 
+type ScheduleRequestStatus = "pendiente" | "aprobada" | "rechazada";
+
 type CreateScheduleEventInput = {
   reservationType: ReservationTypeKey;
   faculty: string;
@@ -25,6 +27,10 @@ type CreateScheduleEventInput = {
     startTime: string;
     endTime: string;
   }>;
+  requestStatus?: ScheduleRequestStatus;
+  requestedByStaffId?: string;
+  requestedByName?: string;
+  requestedByRole?: string;
 };
 
 type UpdateScheduleEventSlotInput = {
@@ -88,10 +94,55 @@ const ensureSlotExceptionsTable = async () => {
   `);
 };
 
+let ensureSlotExceptionsTablePromise: Promise<void> | null = null;
+
+const ensureSlotExceptionsTableReady = async () => {
+  if (!ensureSlotExceptionsTablePromise) {
+    ensureSlotExceptionsTablePromise = ensureSlotExceptionsTable().catch((error) => {
+      ensureSlotExceptionsTablePromise = null;
+      throw error;
+    });
+  }
+
+  await ensureSlotExceptionsTablePromise;
+};
+
+const ensureScheduleRequestsTable = async () => {
+  await prisma.$executeRawUnsafe(`
+    CREATE TABLE IF NOT EXISTS public.solicitudes_salon (
+      id uuid PRIMARY KEY DEFAULT gen_random_uuid(),
+      evento_id uuid NOT NULL UNIQUE REFERENCES public.eventos(id) ON DELETE CASCADE,
+      estado text NOT NULL DEFAULT 'pendiente',
+      solicitado_por_staff_id uuid,
+      solicitado_por_nombre text NOT NULL,
+      solicitado_por_rol text NOT NULL,
+      resuelto_por_staff_id uuid,
+      resuelto_por_nombre text,
+      resuelto_en timestamptz,
+      created_at timestamptz NOT NULL DEFAULT now(),
+      updated_at timestamptz NOT NULL DEFAULT now(),
+      CONSTRAINT solicitudes_salon_estado_chk CHECK (estado IN ('pendiente', 'aprobada', 'rechazada'))
+    )
+  `);
+};
+
+let ensureScheduleRequestsTablePromise: Promise<void> | null = null;
+
+const ensureScheduleRequestsTableReady = async () => {
+  if (!ensureScheduleRequestsTablePromise) {
+    ensureScheduleRequestsTablePromise = ensureScheduleRequestsTable().catch((error) => {
+      ensureScheduleRequestsTablePromise = null;
+      throw error;
+    });
+  }
+
+  await ensureScheduleRequestsTablePromise;
+};
+
 let ensureOverlapFunctionPromise: Promise<void> | null = null;
 
 const ensureOverlapValidationFunction = async () => {
-  await ensureSlotExceptionsTable();
+  await ensureSlotExceptionsTableReady();
 
   await prisma.$executeRawUnsafe(`
     create or replace function public.verificar_solape_horario(
@@ -141,6 +192,7 @@ const ensureOverlapValidationFunction = async () => {
       from public.horarios_evento h
       join public.eventos e on e.id = h.evento_id
       join public.salones sb on sb.id = h.salon_id
+      left join public.solicitudes_salon sr on sr.evento_id = e.id
       left join public.horarios_evento_excepciones x
         on x.horario_id = h.id
        and x.fecha = v_target_date
@@ -148,6 +200,7 @@ const ensureOverlapValidationFunction = async () => {
       where coalesce(x.salon_id, h.salon_id) = p_salon_id
         and coalesce(x.dia_semana, h.dia_semana) = p_dia
         and (p_hora_inicio < coalesce(x.hora_fin, h.hora_fin) and coalesce(x.hora_inicio, h.hora_inicio) < p_hora_fin)
+        and coalesce(sr.estado, 'aprobada') <> 'rechazada'
         and (v_target_date is null or
             (v_target_date >= v_nuevo_inicio and v_target_date <= v_nuevo_fin and
              v_target_date >= e.fecha_inicio and v_target_date <= e.fecha_fin))
@@ -840,6 +893,7 @@ export const replaceAllSchedulesFromRows = async (
 
 export const createScheduleEvent = async (payload: CreateScheduleEventInput) => {
   await ensureOverlapValidationReady();
+  await ensureScheduleRequestsTableReady();
 
   return prisma.$transaction(async (tx) => {
     const facultyIdByName = new Map<string, string>();
@@ -929,6 +983,7 @@ export const createScheduleEvent = async (payload: CreateScheduleEventInput) => 
         FROM public.horarios_evento h
         INNER JOIN public.eventos e ON e.id = h.evento_id
         INNER JOIN public.salones sb ON sb.id = h.salon_id
+        LEFT JOIN public.solicitudes_salon sr ON sr.evento_id = e.id
         LEFT JOIN public.horarios_evento_excepciones x
           ON x.horario_id = h.id
           AND x.fecha = ${targetDateIso}::date
@@ -937,6 +992,7 @@ export const createScheduleEvent = async (payload: CreateScheduleEventInput) => 
           AND COALESCE(x.dia_semana, h.dia_semana) = ${slot.day}::public.dia_semana_enum
           AND (${slot.startTime}::time < COALESCE(x.hora_fin, h.hora_fin)
             AND COALESCE(x.hora_inicio, h.hora_inicio) < ${slot.endTime}::time)
+          AND COALESCE(sr.estado, 'aprobada') <> 'rechazada'
           AND (
             ${targetDateIso}::date IS NULL OR
             (
@@ -1012,6 +1068,40 @@ export const createScheduleEvent = async (payload: CreateScheduleEventInput) => 
           ${slot.endTime}::time
         )
       `;
+
+    await tx.$executeRaw`
+      INSERT INTO public.solicitudes_salon (
+        evento_id,
+        estado,
+        solicitado_por_staff_id,
+        solicitado_por_nombre,
+        solicitado_por_rol,
+        resuelto_por_staff_id,
+        resuelto_por_nombre,
+        resuelto_en,
+        updated_at
+      )
+      VALUES (
+        ${eventId}::uuid,
+        ${payload.requestStatus ?? "aprobada"},
+        ${payload.requestedByStaffId ?? null},
+        ${payload.requestedByName ?? "Sistema"},
+        ${payload.requestedByRole ?? "admin"},
+        ${payload.requestStatus === "aprobada" ? (payload.requestedByStaffId ?? null) : null},
+        ${payload.requestStatus === "aprobada" ? (payload.requestedByName ?? "Sistema") : null},
+        ${payload.requestStatus === "aprobada" ? new Date().toISOString() : null}::timestamptz,
+        now()
+      )
+      ON CONFLICT (evento_id) DO UPDATE SET
+        estado = EXCLUDED.estado,
+        solicitado_por_staff_id = EXCLUDED.solicitado_por_staff_id,
+        solicitado_por_nombre = EXCLUDED.solicitado_por_nombre,
+        solicitado_por_rol = EXCLUDED.solicitado_por_rol,
+        resuelto_por_staff_id = EXCLUDED.resuelto_por_staff_id,
+        resuelto_por_nombre = EXCLUDED.resuelto_por_nombre,
+        resuelto_en = EXCLUDED.resuelto_en,
+        updated_at = now()
+    `;
     }
 
     return { eventId };
@@ -1071,7 +1161,7 @@ export const updateScheduleEventSlot = async (payload: UpdateScheduleEventSlotIn
         });
       }
 
-      await ensureSlotExceptionsTable();
+      await ensureSlotExceptionsTableReady();
 
       const slotOwnership = await tx.$queryRaw<Array<{ id: string }>>`
         SELECT id::text AS id
@@ -1113,6 +1203,7 @@ export const updateScheduleEventSlot = async (payload: UpdateScheduleEventSlotIn
         FROM public.horarios_evento h
         INNER JOIN public.eventos e ON e.id = h.evento_id
         INNER JOIN public.salones sb ON sb.id = h.salon_id
+        LEFT JOIN public.solicitudes_salon sr ON sr.evento_id = e.id
         LEFT JOIN public.horarios_evento_excepciones x
           ON x.horario_id = h.id
          AND x.fecha = ${targetDateIso}::date
@@ -1122,6 +1213,7 @@ export const updateScheduleEventSlot = async (payload: UpdateScheduleEventSlotIn
           AND COALESCE(x.salon_id, h.salon_id) = ${salonId}::uuid
           AND (${payload.startTime}::time < COALESCE(x.hora_fin, h.hora_fin)
             AND COALESCE(x.hora_inicio, h.hora_inicio) < ${payload.endTime}::time)
+          AND COALESCE(sr.estado, 'aprobada') <> 'rechazada'
           AND NOT (h.id = ${payload.slotId}::uuid AND h.evento_id = ${payload.eventId}::uuid)
         LIMIT 1
       `;
@@ -1367,12 +1459,14 @@ export const clearAllSchedules = async (requestedBy = "schedules-ui") => {
 };
 
 export const getScheduleEvents = async () => {
-  await ensureSlotExceptionsTable();
+  await ensureSlotExceptionsTableReady();
+  await ensureScheduleRequestsTableReady();
 
   const events = await prisma.$queryRaw<
     Array<{
       evento_id: string;
       horario_id: string;
+      request_id: string | null;
       day: string;
       room: string;
       start: string;
@@ -1384,6 +1478,7 @@ export const getScheduleEvents = async () => {
       start_date: string;
       end_date: string;
       tipo_reserva_id: number;
+      request_status: ScheduleRequestStatus | null;
     }>
   >`
     SELECT
@@ -1399,11 +1494,15 @@ export const getScheduleEvents = async () => {
       e.responsable AS teacher,
       TO_CHAR(e.fecha_inicio, 'YYYY-MM-DD') AS start_date,
       TO_CHAR(e.fecha_fin, 'YYYY-MM-DD') AS end_date,
-      e.tipo_reserva_id
+      e.tipo_reserva_id,
+      sr.id::text AS request_id,
+      sr.estado AS request_status
     FROM public.eventos e
     INNER JOIN public.horarios_evento h ON h.evento_id = e.id
     INNER JOIN public.salones s ON s.id = h.salon_id
     LEFT JOIN public.facultades f ON f.id = e.facultad_id
+    LEFT JOIN public.solicitudes_salon sr ON sr.evento_id = e.id
+    WHERE COALESCE(sr.estado, 'aprobada') <> 'rechazada'
     ORDER BY e.nombre_principal ASC
   `;
 
@@ -1445,6 +1544,7 @@ export const getScheduleEvents = async () => {
   return events.map((item) => ({
     id: `${item.evento_id}:${item.horario_id}`,
     classId: item.evento_id,
+    requestId: item.request_id ?? undefined,
     day: item.day,
     room: canonicalRoomName(item.room) ?? item.room,
     start: item.start,
@@ -1458,7 +1558,104 @@ export const getScheduleEvents = async () => {
     overrides: overridesBySlot.get(item.horario_id) ?? [],
     reservationType: item.tipo_reserva_id === 3 ? "iglesia" : item.tipo_reserva_id === 2 ? "momentanea" : "normal",
     color: item.tipo_reserva_id === 3 ? "red" : item.tipo_reserva_id === 2 ? "amber" : "blue",
+    requestStatus: item.request_status ?? "aprobada",
   }));
+};
+
+export const getPendingScheduleRequests = async () => {
+  await ensureScheduleRequestsTableReady();
+
+  const requests = await prisma.$queryRaw<
+    Array<{
+      request_id: string;
+      event_id: string;
+      status: ScheduleRequestStatus;
+      requested_by_name: string;
+      requested_by_role: string;
+      faculty: string;
+      code: string;
+      subject: string;
+      teacher: string;
+      room: string;
+      day: string;
+      start: string;
+      end: string;
+      start_date: string;
+      end_date: string;
+      created_at: string;
+    }>
+  >`
+    SELECT DISTINCT ON (sr.id)
+      sr.id::text AS request_id,
+      e.id::text AS event_id,
+      sr.estado AS status,
+      sr.solicitado_por_nombre AS requested_by_name,
+      sr.solicitado_por_rol AS requested_by_role,
+      COALESCE(f.nombre, 'Reserva') AS faculty,
+      COALESCE(e.codigo_materia, 'SOLICITUD') AS code,
+      e.nombre_principal AS subject,
+      e.responsable AS teacher,
+      s.nombre_bloque AS room,
+      h.dia_semana::text AS day,
+      TO_CHAR(h.hora_inicio, 'HH24:MI') AS start,
+      TO_CHAR(h.hora_fin, 'HH24:MI') AS "end",
+      TO_CHAR(e.fecha_inicio, 'YYYY-MM-DD') AS start_date,
+      TO_CHAR(e.fecha_fin, 'YYYY-MM-DD') AS end_date,
+      TO_CHAR(sr.created_at, 'YYYY-MM-DD"T"HH24:MI:SS.MS"Z"') AS created_at
+    FROM public.solicitudes_salon sr
+    INNER JOIN public.eventos e ON e.id = sr.evento_id
+    INNER JOIN public.horarios_evento h ON h.evento_id = e.id
+    INNER JOIN public.salones s ON s.id = h.salon_id
+    LEFT JOIN public.facultades f ON f.id = e.facultad_id
+    WHERE sr.estado = 'pendiente'
+    ORDER BY sr.id, h.dia_semana, h.hora_inicio
+  `;
+
+  return requests.map((request) => ({
+    id: request.request_id,
+    eventId: request.event_id,
+    status: request.status,
+    requestedByName: request.requested_by_name,
+    requestedByRole: request.requested_by_role,
+    faculty: request.faculty,
+    code: request.code,
+    subject: request.subject,
+    teacher: request.teacher,
+    room: canonicalRoomName(request.room) ?? request.room,
+    day: request.day,
+    start: request.start,
+    end: request.end,
+    startDate: request.start_date,
+    endDate: request.end_date,
+    createdAt: request.created_at,
+  }));
+};
+
+export const updateScheduleRequestStatus = async (
+  requestId: string,
+  status: Exclude<ScheduleRequestStatus, "pendiente">,
+  reviewer: { staffId: string; name: string; role: string }
+) => {
+  await ensureScheduleRequestsTableReady();
+
+  const updated = await prisma.$queryRaw<Array<{ id: string }>>`
+    UPDATE public.solicitudes_salon
+    SET
+      estado = ${status},
+      resuelto_por_staff_id = ${reviewer.staffId}::uuid,
+      resuelto_por_nombre = ${reviewer.name},
+      resuelto_en = now(),
+      updated_at = now()
+    WHERE id = ${requestId}::uuid
+      AND estado = 'pendiente'
+    RETURNING id::text AS id
+  `;
+
+  if (!updated[0]?.id) {
+    throw new Error("No se encontro la solicitud pendiente");
+  }
+
+  return { requestId: updated[0].id };
 };
 
 export const getRooms = async () => {

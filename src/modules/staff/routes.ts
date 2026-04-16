@@ -398,6 +398,10 @@ staffRouter.post("/change-password", async (req, res, next) => {
       return res.status(401).json({ error: "No autorizado" });
     }
 
+    if (authUser.role === "colaborador") {
+      return res.status(403).json({ error: "La opción de cambiar contraseña no está disponible para colaboradores." });
+    }
+
     const parsed = changePasswordBodySchema.parse(req.body);
 
     if (authUser.cedula !== parsed.cedula) {

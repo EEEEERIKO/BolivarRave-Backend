@@ -1,5 +1,6 @@
 import { Router } from "express";
 import { z } from "zod";
+import { requireAdminRole } from "../../lib/auth";
 import { broadcastScheduleRefresh } from "../../lib/websocket";
 import {
   buildReservasAuditorioHistoryExcel,
@@ -10,9 +11,6 @@ import {
   updateReservaAuditorio,
   type AuditorioEstado,
 } from "./service";
-
-const ADMIN_API_KEY = (process.env.ADMIN_API_KEY ?? "").trim();
-const isProduction = process.env.NODE_ENV === "production";
 
 export const auditorioRouter = Router();
 
@@ -57,26 +55,6 @@ const toLocalDate = (isoDate: string) => {
 const toMinutes = (value: string) => {
   const [hour, minute] = value.split(":").map(Number);
   return (hour ?? 0) * 60 + (minute ?? 0);
-};
-
-const requireAdminKey: import("express").RequestHandler = (req, res, next) => {
-  if (!isProduction) {
-    return next();
-  }
-
-  if (!ADMIN_API_KEY) {
-    return res.status(503).json({ error: "ADMIN_API_KEY no configurada en backend" });
-  }
-
-  const fromHeader = (req.header("x-admin-key") ?? "").trim();
-  const fromBearer = (req.header("authorization") ?? "").replace(/^Bearer\s+/i, "").trim();
-  const provided = fromHeader || fromBearer;
-
-  if (!provided || provided !== ADMIN_API_KEY) {
-    return res.status(401).json({ error: "No autorizado" });
-  }
-
-  return next();
 };
 
 const validateHorariosNoOverlap = (
@@ -180,7 +158,7 @@ auditorioRouter.get("/reservas/export", async (_req, res, next) => {
   }
 });
 
-auditorioRouter.post("/reservas", requireAdminKey, async (req, res, next) => {
+auditorioRouter.post("/reservas", requireAdminRole, async (req, res, next) => {
   try {
     const parsed = reservaBodySchema.parse(req.body);
 
@@ -228,7 +206,7 @@ auditorioRouter.post("/reservas", requireAdminKey, async (req, res, next) => {
   }
 });
 
-auditorioRouter.put("/reservas/:id", requireAdminKey, async (req, res, next) => {
+auditorioRouter.put("/reservas/:id", requireAdminRole, async (req, res, next) => {
   try {
     const { id } = idParamsSchema.parse(req.params);
     const parsed = reservaBodySchema.parse(req.body);
@@ -278,7 +256,7 @@ auditorioRouter.put("/reservas/:id", requireAdminKey, async (req, res, next) => 
   }
 });
 
-auditorioRouter.patch("/reservas/:id/estado", requireAdminKey, async (req, res, next) => {
+auditorioRouter.patch("/reservas/:id/estado", requireAdminRole, async (req, res, next) => {
   try {
     const { id } = idParamsSchema.parse(req.params);
     const { estado } = patchEstadoBodySchema.parse(req.body);
@@ -306,7 +284,7 @@ auditorioRouter.patch("/reservas/:id/estado", requireAdminKey, async (req, res, 
   }
 });
 
-auditorioRouter.delete("/reservas/:id", requireAdminKey, async (req, res, next) => {
+auditorioRouter.delete("/reservas/:id", requireAdminRole, async (req, res, next) => {
   try {
     const { id } = idParamsSchema.parse(req.params);
 
