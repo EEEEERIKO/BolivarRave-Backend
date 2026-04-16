@@ -88,10 +88,23 @@ const ensureSlotExceptionsTable = async () => {
   `);
 };
 
+let ensureSlotExceptionsTablePromise: Promise<void> | null = null;
+
+const ensureSlotExceptionsTableReady = async () => {
+  if (!ensureSlotExceptionsTablePromise) {
+    ensureSlotExceptionsTablePromise = ensureSlotExceptionsTable().catch((error) => {
+      ensureSlotExceptionsTablePromise = null;
+      throw error;
+    });
+  }
+
+  await ensureSlotExceptionsTablePromise;
+};
+
 let ensureOverlapFunctionPromise: Promise<void> | null = null;
 
 const ensureOverlapValidationFunction = async () => {
-  await ensureSlotExceptionsTable();
+  await ensureSlotExceptionsTableReady();
 
   await prisma.$executeRawUnsafe(`
     create or replace function public.verificar_solape_horario(
@@ -1071,7 +1084,7 @@ export const updateScheduleEventSlot = async (payload: UpdateScheduleEventSlotIn
         });
       }
 
-      await ensureSlotExceptionsTable();
+      await ensureSlotExceptionsTableReady();
 
       const slotOwnership = await tx.$queryRaw<Array<{ id: string }>>`
         SELECT id::text AS id
@@ -1367,7 +1380,7 @@ export const clearAllSchedules = async (requestedBy = "schedules-ui") => {
 };
 
 export const getScheduleEvents = async () => {
-  await ensureSlotExceptionsTable();
+  await ensureSlotExceptionsTableReady();
 
   const events = await prisma.$queryRaw<
     Array<{
