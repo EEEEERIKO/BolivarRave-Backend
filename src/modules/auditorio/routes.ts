@@ -1,11 +1,12 @@
 import { Router } from "express";
 import { z } from "zod";
-import { requireAdminRole } from "../../lib/auth";
+import { requireAdminOrMonitorRole, requireAdminRole, requireAuthToken, type AuthenticatedRequest } from "../../lib/auth";
 import { broadcastScheduleRefresh } from "../../lib/websocket";
 import {
   buildReservasAuditorioHistoryExcel,
   createReservaAuditorio,
   deleteReservaAuditorio,
+  listUpcomingAuditorioNotifications,
   listReservasAuditorio,
   updateEstadoReservaAuditorio,
   updateReservaAuditorio,
@@ -34,6 +35,7 @@ const reservaBodySchema = z.object({
   requiereMonitor: z.boolean().default(false),
   requiereProyector: z.boolean().default(false),
   requiereFiltroAgua: z.boolean().default(false),
+  encargadoStaffIds: z.array(z.string().uuid()).default([]),
   observaciones: z.string().trim().max(4000).optional().nullable(),
   estado: z.enum(["Pendiente", "Aprobada", "Cancelada"]).default("Pendiente"),
   horarios: z.array(horarioSchema).min(1),
@@ -132,10 +134,17 @@ const handleKnownAuditorioWriteError = (error: unknown, res: import("express").R
     return true;
   }
 
+  if (message.includes("staff_encargado_invalido")) {
+    res.status(400).json({
+      error: "Uno o más encargados seleccionados no existen en personal.",
+    });
+    return true;
+  }
+
   return false;
 };
 
-auditorioRouter.get("/reservas", async (_req, res, next) => {
+auditorioRouter.get("/reservas", requireAdminOrMonitorRole, async (_req, res, next) => {
   try {
     const reservas = await listReservasAuditorio();
     return res.json({ reservas });
@@ -144,7 +153,19 @@ auditorioRouter.get("/reservas", async (_req, res, next) => {
   }
 });
 
-auditorioRouter.get("/reservas/export", async (_req, res, next) => {
+auditorioRouter.get("/notifications/upcoming", requireAuthToken, async (req, res, next) => {
+  try {
+    const authUser = (req as AuthenticatedRequest).authUser;
+    const notifications = await listUpcomingAuditorioNotifications({
+      assignedStaffId: authUser?.role === "colaborador" ? authUser.staffId : undefined,
+    });
+    return res.json({ notifications });
+  } catch (error) {
+    return next(error);
+  }
+});
+
+auditorioRouter.get("/reservas/export", requireAdminOrMonitorRole, async (_req, res, next) => {
   try {
     const { buffer, fileName } = await buildReservasAuditorioHistoryExcel();
 
@@ -176,6 +197,7 @@ auditorioRouter.post("/reservas", requireAdminRole, async (req, res, next) => {
       requiereMonitor: parsed.requiereMonitor,
       requiereProyector: parsed.requiereProyector,
       requiereFiltroAgua: parsed.requiereFiltroAgua,
+      encargadoStaffIds: Array.from(new Set(parsed.encargadoStaffIds)),
       observaciones: parsed.observaciones ?? null,
       estado: parsed.estado as AuditorioEstado,
       horarios: parsed.horarios.map((h) => ({
@@ -226,6 +248,7 @@ auditorioRouter.put("/reservas/:id", requireAdminRole, async (req, res, next) =>
       requiereMonitor: parsed.requiereMonitor,
       requiereProyector: parsed.requiereProyector,
       requiereFiltroAgua: parsed.requiereFiltroAgua,
+      encargadoStaffIds: Array.from(new Set(parsed.encargadoStaffIds)),
       observaciones: parsed.observaciones ?? null,
       estado: parsed.estado as AuditorioEstado,
       horarios: parsed.horarios.map((h) => ({

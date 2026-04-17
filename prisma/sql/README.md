@@ -14,6 +14,8 @@ Run only:
 - [012_staff_horario_laboral_schema.sql](012_staff_horario_laboral_schema.sql)
 - [013_auditorio_requerimientos_extra.sql](013_auditorio_requerimientos_extra.sql)
 - [014_enable_rls_for_staff_tasks_auditorio.sql](014_enable_rls_for_staff_tasks_auditorio.sql)
+- [015_schedule_requests_schema.sql](015_schedule_requests_schema.sql)
+- [016_auditorio_event_staff_assignments.sql](016_auditorio_event_staff_assignments.sql)
 
 This single file creates:
 
@@ -60,6 +62,11 @@ And [015_schedule_requests_schema.sql](015_schedule_requests_schema.sql) creates
 
 - `solicitudes_salon`
 - estados de solicitud para reservas de horario (`pendiente`, `aprobada`, `rechazada`)
+
+And [016_auditorio_event_staff_assignments.sql](016_auditorio_event_staff_assignments.sql) creates:
+
+- `auditorio_reserva_encargados`
+- asignacion de uno o varios trabajadores encargados por reserva de auditorio
 
 And [012_staff_horario_laboral_schema.sql](012_staff_horario_laboral_schema.sql) creates:
 

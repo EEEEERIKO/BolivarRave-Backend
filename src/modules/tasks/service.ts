@@ -1,6 +1,12 @@
+import type { Prisma } from "@prisma/client";
 import { prisma } from "../../lib/prisma";
 
 let schemaBootstrapPromise: Promise<void> | null = null;
+
+const TX_OPTIONS = {
+  maxWait: 15000,
+  timeout: 60000,
+} as const;
 
 async function bootstrapTasksSchema() {
   const statements = [
@@ -320,6 +326,10 @@ export type UpdateCatalogTaskInput = CreateCatalogTaskInput & {
   id: string;
 };
 
+export type CreateCatalogTaskBatchInput = Omit<CreateCatalogTaskInput, "sector"> & {
+  sectores: string[];
+};
+
 export type CreateTaskInstanceInput = {
   tareaCatalogoId: string;
   salonId: string | null;
@@ -353,6 +363,11 @@ export type LinkStaffHabilidadInput = {
 };
 
 export type CreateTaskSpaceInput = {
+  nombre: string;
+};
+
+export type UpdateTaskSpaceInput = {
+  id: string;
   nombre: string;
 };
 
@@ -471,78 +486,102 @@ export const listTaskCatalog = async () => {
   } satisfies CatalogoTask));
 };
 
-export const createTaskCatalog = async (payload: CreateCatalogTaskInput) => {
-  return prisma.$transaction(async (tx) => {
-    const created = await tx.$queryRaw<Array<{ id: string }>>`
-      INSERT INTO public.tareas_catalogo (
-        nombre,
-        tipo,
-        tiempo_estimado_min,
-        puntos_otorgados,
-        sector,
-        modo_asignacion,
-        cantidad_personal,
-        dias_semana,
-        hora_programada,
-        fecha_esporadica,
-        hora_esporadica,
-        requiere_finalizacion,
-        tarea_finalizacion,
-        fecha_finalizacion,
-        hora_finalizacion
-      )
-      VALUES (
-        ${payload.nombre},
-        ${payload.tipo}::public.tarea_tipo_enum,
-        ${payload.tiempoEstimadoMin},
-        0,
-        ${payload.sector},
-        ${payload.modoAsignacion}::public.tarea_asignacion_modo_enum,
-        ${payload.cantidadPersonal},
-        ${payload.diasSemana}::smallint[],
-        ${payload.horaProgramada}::time,
-        ${payload.fechaEsporadica}::date,
-        ${payload.horaEsporadica}::time,
-        ${payload.requiereFinalizacion},
-        ${payload.tareaFinalizacion},
-        ${payload.fechaFinalizacion}::date,
-        ${payload.horaFinalizacion}::time
-      )
-      RETURNING id::text AS id
+const createCatalogTaskRecord = async (tx: Prisma.TransactionClient, payload: CreateCatalogTaskInput) => {
+  const created = await tx.$queryRaw<Array<{ id: string }>>`
+    INSERT INTO public.tareas_catalogo (
+      nombre,
+      tipo,
+      tiempo_estimado_min,
+      puntos_otorgados,
+      sector,
+      modo_asignacion,
+      cantidad_personal,
+      dias_semana,
+      hora_programada,
+      fecha_esporadica,
+      hora_esporadica,
+      requiere_finalizacion,
+      tarea_finalizacion,
+      fecha_finalizacion,
+      hora_finalizacion
+    )
+    VALUES (
+      ${payload.nombre},
+      ${payload.tipo}::public.tarea_tipo_enum,
+      ${payload.tiempoEstimadoMin},
+      0,
+      ${payload.sector},
+      ${payload.modoAsignacion}::public.tarea_asignacion_modo_enum,
+      ${payload.cantidadPersonal},
+      ${payload.diasSemana}::smallint[],
+      ${payload.horaProgramada}::time,
+      ${payload.fechaEsporadica}::date,
+      ${payload.horaEsporadica}::time,
+      ${payload.requiereFinalizacion},
+      ${payload.tareaFinalizacion},
+      ${payload.fechaFinalizacion}::date,
+      ${payload.horaFinalizacion}::time
+    )
+    RETURNING id::text AS id
+  `;
+
+  const id = created[0]?.id;
+  if (!id) {
+    throw new Error("No se pudo crear la tarea de catalogo");
+  }
+
+  for (const skillId of payload.habilidadesRequeridasIds) {
+    await tx.$executeRaw`
+      INSERT INTO public.tareas_catalogo_habilidades (tarea_catalogo_id, habilidad_id)
+      VALUES (${id}::uuid, ${skillId}::uuid)
+      ON CONFLICT (tarea_catalogo_id, habilidad_id) DO NOTHING
     `;
+  }
 
-    const id = created[0]?.id;
-    if (!id) {
-      throw new Error("No se pudo crear la tarea de catalogo");
+  for (const [orden, nombre] of payload.requerimientos.entries()) {
+    await tx.$executeRaw`
+      INSERT INTO public.tareas_catalogo_requerimientos (tarea_catalogo_id, nombre, orden)
+      VALUES (${id}::uuid, ${nombre}, ${orden})
+      ON CONFLICT (tarea_catalogo_id, nombre) DO UPDATE
+      SET orden = EXCLUDED.orden
+    `;
+  }
+
+  for (const staffId of payload.staffAsignadosIds) {
+    await tx.$executeRaw`
+      INSERT INTO public.tareas_catalogo_staff (tarea_catalogo_id, staff_id)
+      VALUES (${id}::uuid, ${staffId}::uuid)
+      ON CONFLICT (tarea_catalogo_id, staff_id) DO NOTHING
+    `;
+  }
+
+  return { id };
+};
+
+export const createTaskCatalog = async (payload: CreateCatalogTaskInput) => {
+  return prisma.$transaction(async (tx) => createCatalogTaskRecord(tx, payload), TX_OPTIONS);
+};
+
+export const createTaskCatalogBatch = async (payload: CreateCatalogTaskBatchInput) => {
+  const sectores = Array.from(new Set(payload.sectores.map((sector) => sector.trim()).filter((sector) => sector.length > 0)));
+
+  if (sectores.length === 0) {
+    throw new Error("Selecciona al menos un lugar para crear la tarea de catalogo");
+  }
+
+  return prisma.$transaction(async (tx) => {
+    const ids: string[] = [];
+
+    for (const sector of sectores) {
+      const created = await createCatalogTaskRecord(tx, {
+        ...payload,
+        sector,
+      });
+      ids.push(created.id);
     }
 
-    for (const skillId of payload.habilidadesRequeridasIds) {
-      await tx.$executeRaw`
-        INSERT INTO public.tareas_catalogo_habilidades (tarea_catalogo_id, habilidad_id)
-        VALUES (${id}::uuid, ${skillId}::uuid)
-        ON CONFLICT (tarea_catalogo_id, habilidad_id) DO NOTHING
-      `;
-    }
-
-    for (const [orden, nombre] of payload.requerimientos.entries()) {
-      await tx.$executeRaw`
-        INSERT INTO public.tareas_catalogo_requerimientos (tarea_catalogo_id, nombre, orden)
-        VALUES (${id}::uuid, ${nombre}, ${orden})
-        ON CONFLICT (tarea_catalogo_id, nombre) DO UPDATE
-        SET orden = EXCLUDED.orden
-      `;
-    }
-
-    for (const staffId of payload.staffAsignadosIds) {
-      await tx.$executeRaw`
-        INSERT INTO public.tareas_catalogo_staff (tarea_catalogo_id, staff_id)
-        VALUES (${id}::uuid, ${staffId}::uuid)
-        ON CONFLICT (tarea_catalogo_id, staff_id) DO NOTHING
-      `;
-    }
-
-    return { id };
-  });
+    return { ids };
+  }, TX_OPTIONS);
 };
 
 export const updateTaskCatalog = async (payload: UpdateCatalogTaskInput) => {
@@ -614,7 +653,7 @@ export const updateTaskCatalog = async (payload: UpdateCatalogTaskInput) => {
     }
 
     return { id };
-  });
+  }, TX_OPTIONS);
 };
 
 export const deleteTaskCatalog = async (id: string) => {
@@ -642,7 +681,7 @@ export const deleteTaskCatalog = async (id: string) => {
     }
 
     return { id: deletedId };
-  });
+  }, TX_OPTIONS);
 };
 
 export const listHabilidades = async () => {
@@ -720,6 +759,42 @@ export const createTaskSpace = async (payload: CreateTaskSpaceInput) => {
   }
 
   return { id };
+};
+
+export const updateTaskSpace = async (payload: UpdateTaskSpaceInput) => {
+  const trimmedName = payload.nombre.trim();
+  if (!trimmedName) {
+    throw new Error("El nombre del espacio es obligatorio");
+  }
+
+  const updated = await prisma.$queryRaw<Array<{ id: string }>>`
+    UPDATE public.tareas_espacios_personalizados
+    SET nombre = ${trimmedName}
+    WHERE id = ${payload.id}::uuid
+    RETURNING id::text AS id
+  `;
+
+  const id = updated[0]?.id;
+  if (!id) {
+    throw new Error("No se encontro el espacio a modificar");
+  }
+
+  return { id };
+};
+
+export const deleteTaskSpace = async (id: string) => {
+  const deleted = await prisma.$queryRaw<Array<{ id: string }>>`
+    DELETE FROM public.tareas_espacios_personalizados
+    WHERE id = ${id}::uuid
+    RETURNING id::text AS id
+  `;
+
+  const deletedId = deleted[0]?.id;
+  if (!deletedId) {
+    throw new Error("No se encontro el espacio a eliminar");
+  }
+
+  return { id: deletedId };
 };
 
 export const createHabilidad = async (payload: CreateHabilidadInput) => {
