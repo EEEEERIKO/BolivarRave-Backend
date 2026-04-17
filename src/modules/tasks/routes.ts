@@ -4,8 +4,9 @@ import {
   assignTaskToStaff,
   createTaskSpace,
   createHabilidad,
-  createTaskCatalog,
+  createTaskCatalogBatch,
   createTaskInstance,
+  deleteTaskSpace,
   deleteTaskCatalog,
   deleteHabilidad,
   ensureTasksSchema,
@@ -19,6 +20,7 @@ import {
   unlinkStaffHabilidad,
   reviewTaskAssignment,
   sendTaskToReview,
+  updateTaskSpace,
   updateTaskCatalog,
   updateHabilidad,
   type TareaEstado,
@@ -54,7 +56,8 @@ const idParamsSchema = z.object({
 const createCatalogSchema = z.object({
   nombre: z.string().trim().min(2).max(150),
   tipo: z.enum(tipoEnum),
-  sector: z.string().trim().min(2).max(120),
+  sectores: z.array(z.string().trim().min(2).max(120)).min(1).max(20).optional(),
+  sector: z.string().trim().min(2).max(120).optional(),
   modoAsignacion: z.enum(modoAsignacionEnum),
   cantidadPersonal: z.number().int().min(1).max(50),
   habilidadesRequeridasIds: z.array(z.string().uuid()).max(30).default([]),
@@ -113,6 +116,10 @@ const createTaskSpaceSchema = z.object({
   nombre: z.string().trim().min(2).max(120),
 });
 
+const updateTaskSpaceSchema = z.object({
+  nombre: z.string().trim().min(2).max(120),
+});
+
 const createInstanceSchema = z.object({
   tareaCatalogoId: z.string().uuid(),
   salonId: z.string().uuid().nullable().optional(),
@@ -121,6 +128,11 @@ const createInstanceSchema = z.object({
   fechaProgramada: z.string().regex(/^\d{4}-\d{2}-\d{2}$/),
   horaProgramada: z.string().regex(/^\d{2}:\d{2}$/),
   asignacionAutomatica: z.boolean().default(false),
+});
+
+const updateCatalogSchema = createCatalogSchema.safeExtend({
+  sector: z.string().trim().min(2).max(120),
+  sectores: z.undefined().optional(),
 });
 
 const assignTaskSchema = z.object({
@@ -205,6 +217,43 @@ tasksRouter.post("/spaces", requireAdminKey, async (req, res, next) => {
   }
 });
 
+tasksRouter.put("/spaces/:id", requireAdminKey, async (req, res, next) => {
+  try {
+    const { id } = idParamsSchema.parse(req.params);
+    const parsed = updateTaskSpaceSchema.parse(req.body);
+    const updated = await updateTaskSpace({ id, nombre: parsed.nombre });
+
+    return res.json({
+      message: "Espacio actualizado correctamente",
+      id: updated.id,
+    });
+  } catch (error) {
+    if (error instanceof z.ZodError) {
+      return res.status(400).json({ error: `Payload invalido: ${error.issues[0]?.message ?? "error de validacion"}` });
+    }
+
+    return next(error);
+  }
+});
+
+tasksRouter.delete("/spaces/:id", requireAdminKey, async (req, res, next) => {
+  try {
+    const { id } = idParamsSchema.parse(req.params);
+    const deleted = await deleteTaskSpace(id);
+
+    return res.json({
+      message: "Espacio eliminado correctamente",
+      id: deleted.id,
+    });
+  } catch (error) {
+    if (error instanceof z.ZodError) {
+      return res.status(400).json({ error: `Payload invalido: ${error.issues[0]?.message ?? "error de validacion"}` });
+    }
+
+    return next(error);
+  }
+});
+
 tasksRouter.post("/skills", requireAdminKey, async (req, res, next) => {
   try {
     const parsed = createHabilidadSchema.parse(req.body);
@@ -263,11 +312,15 @@ tasksRouter.delete("/skills/:id", requireAdminKey, async (req, res, next) => {
 tasksRouter.post("/catalog", requireAdminKey, async (req, res, next) => {
   try {
     const parsed = createCatalogSchema.parse(req.body);
+    const sectores = Array.from(new Set((parsed.sectores ?? (parsed.sector ? [parsed.sector] : [])).map((sector) => sector.trim()).filter(Boolean)));
 
-    const created = await createTaskCatalog({
+    if (sectores.length === 0) {
+      return res.status(400).json({ error: "Selecciona al menos un lugar para crear la tarea de catalogo" });
+    }
+
+    const created = await createTaskCatalogBatch({
       nombre: parsed.nombre,
       tipo: parsed.tipo as TareaTipo,
-      sector: parsed.sector,
       modoAsignacion: parsed.modoAsignacion as TareaModoAsignacion,
       cantidadPersonal: parsed.cantidadPersonal,
       habilidadesRequeridasIds: Array.from(new Set(parsed.habilidadesRequeridasIds)),
@@ -286,11 +339,12 @@ tasksRouter.post("/catalog", requireAdminKey, async (req, res, next) => {
       horaFinalizacion: parsed.requiereFinalizacion ? (parsed.horaFinalizacion ?? null) : null,
       staffAsignadosIds: Array.from(new Set(parsed.staffAsignadosIds)),
       tiempoEstimadoMin: parsed.tiempoEstimadoMin,
+      sectores,
     });
 
     return res.status(201).json({
-      message: "Tarea de catalogo creada correctamente",
-      id: created.id,
+      message: sectores.length > 1 ? "Tareas de catalogo creadas correctamente" : "Tarea de catalogo creada correctamente",
+      ids: created.ids,
     });
   } catch (error) {
     if (error instanceof z.ZodError) {
@@ -304,7 +358,7 @@ tasksRouter.post("/catalog", requireAdminKey, async (req, res, next) => {
 tasksRouter.put("/catalog/:id", requireAdminKey, async (req, res, next) => {
   try {
     const { id } = idParamsSchema.parse(req.params);
-    const parsed = createCatalogSchema.parse(req.body);
+    const parsed = updateCatalogSchema.parse(req.body);
 
     const updated = await updateTaskCatalog({
       id,

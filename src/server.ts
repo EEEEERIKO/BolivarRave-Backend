@@ -117,7 +117,7 @@ app.use("/api", (req, res, next) => {
 });
 
 app.use("/api/schedules", schedulesRouter);
-app.use("/api/auditorio", requireAdminOrMonitorRole, auditorioRouter);
+app.use("/api/auditorio", auditorioRouter);
 app.use("/api/staff", staffRouter);
 app.use("/api/tasks", requireAdminOrMonitorRole, tasksRouter);
 

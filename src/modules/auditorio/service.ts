@@ -23,10 +23,38 @@ export type CreateReservaAuditorioInput = {
   observaciones: string | null;
   estado: AuditorioEstado;
   horarios: AuditorioHorarioInput[];
+  encargadoStaffIds: string[];
 };
 
 export type UpdateReservaAuditorioInput = CreateReservaAuditorioInput & {
   id: string;
+};
+
+type AuditorioEncargado = {
+  staffId: string;
+  cedula: string;
+  numeroStaff: number;
+  nombreCompleto: string;
+  rol: string;
+  estado: string;
+};
+
+export type UpcomingAuditorioNotification = {
+  id: string;
+  reservaId: string;
+  nombreEvento: string;
+  organizador: string;
+  estado: AuditorioEstado;
+  fechaEspecifica: string;
+  horaInicio: string;
+  horaFin: string;
+  startsAt: string;
+  notificationType: "en_curso" | "proximo";
+  assignedWorkers: AuditorioEncargado[];
+};
+
+type ListUpcomingAuditorioNotificationsOptions = {
+  assignedStaffId?: string | undefined;
 };
 
 const toIsoDate = (value: Date) => value.toISOString().slice(0, 10);
@@ -49,6 +77,94 @@ const pickExistingColumn = (available: Set<string>, candidates: string[]) => {
   return null;
 };
 
+const toSqlLocalTimestamp = (value: Date) => {
+  const year = value.getFullYear();
+  const month = String(value.getMonth() + 1).padStart(2, "0");
+  const day = String(value.getDate()).padStart(2, "0");
+  const hour = String(value.getHours()).padStart(2, "0");
+  const minute = String(value.getMinutes()).padStart(2, "0");
+  const second = String(value.getSeconds()).padStart(2, "0");
+  return `${year}-${month}-${day} ${hour}:${minute}:${second}`;
+};
+
+let ensureAuditorioEncargadosTablePromise: Promise<void> | null = null;
+
+const ensureAuditorioEncargadosTableReady = async () => {
+  if (!ensureAuditorioEncargadosTablePromise) {
+    ensureAuditorioEncargadosTablePromise = (async () => {
+      await prisma.$executeRawUnsafe(`
+        CREATE TABLE IF NOT EXISTS public.auditorio_reserva_encargados (
+          id uuid PRIMARY KEY DEFAULT gen_random_uuid(),
+          reserva_id uuid NOT NULL REFERENCES public.reservas_auditorio(id) ON DELETE CASCADE,
+          staff_id uuid NOT NULL REFERENCES public.staff(id) ON DELETE CASCADE,
+          created_at timestamptz NOT NULL DEFAULT now(),
+          updated_at timestamptz NOT NULL DEFAULT now(),
+          CONSTRAINT auditorio_reserva_encargados_reserva_staff_uq UNIQUE (reserva_id, staff_id)
+        );
+
+        CREATE INDEX IF NOT EXISTS idx_auditorio_reserva_encargados_reserva_id
+          ON public.auditorio_reserva_encargados(reserva_id);
+
+        CREATE INDEX IF NOT EXISTS idx_auditorio_reserva_encargados_staff_id
+          ON public.auditorio_reserva_encargados(staff_id);
+      `);
+    })().catch((error) => {
+      ensureAuditorioEncargadosTablePromise = null;
+      throw error;
+    });
+  }
+
+  await ensureAuditorioEncargadosTablePromise;
+};
+
+const syncReservaEncargadosTx = async (
+  tx: Pick<typeof prisma, "$queryRaw" | "$executeRaw">,
+  reservaId: string,
+  encargadoStaffIds: string[]
+) => {
+  const uniqueIds = Array.from(new Set(encargadoStaffIds.map((value) => value.trim()).filter(Boolean)));
+
+  await tx.$executeRaw`
+    DELETE FROM public.auditorio_reserva_encargados
+    WHERE reserva_id = ${reservaId}::uuid
+  `;
+
+  if (uniqueIds.length === 0) {
+    return;
+  }
+
+  const existingStaff = await tx.$queryRaw<Array<{ id: string }>>`
+    SELECT id::text AS id
+    FROM public.staff
+    WHERE id::text = ANY(${uniqueIds})
+  `;
+
+  const existingIds = new Set(existingStaff.map((row) => row.id));
+  const invalidIds = uniqueIds.filter((id) => !existingIds.has(id));
+
+  if (invalidIds.length > 0) {
+    throw new Error(`STAFF_ENCARGADO_INVALIDO|${invalidIds.join(",")}`);
+  }
+
+  for (const staffId of uniqueIds) {
+    await tx.$executeRaw`
+      INSERT INTO public.auditorio_reserva_encargados (
+        reserva_id,
+        staff_id,
+        updated_at
+      )
+      VALUES (
+        ${reservaId}::uuid,
+        ${staffId}::uuid,
+        NOW()
+      )
+      ON CONFLICT (reserva_id, staff_id)
+      DO UPDATE SET
+        updated_at = NOW()
+    `;
+  }
+};
+
 const getAuditorioRequerimientosColumns = async (): Promise<AuditorioRequerimientosColumns> => {
   const columns = await prisma.$queryRaw<Array<{ column_name: string }>>`
     SELECT column_name
@@ -67,6 +183,8 @@ const getAuditorioRequerimientosColumns = async (): Promise<AuditorioRequerimien
 };
 
 export const listReservasAuditorio = async () => {
+  await ensureAuditorioEncargadosTableReady();
+
   const requerimientosColumns = await getAuditorioRequerimientosColumns();
   const monitorSelect = requerimientosColumns.requiereMonitor
     ? `r.${quoteIdentifier(requerimientosColumns.requiereMonitor)} AS requiere_monitor,`
@@ -148,6 +266,7 @@ export const listReservasAuditorio = async () => {
     observaciones: string | null;
     estado: AuditorioEstado;
     fechaCreacion: string;
+    encargados: AuditorioEncargado[];
     horarios: Array<{
       id: string;
       fechaEspecifica: string;
@@ -175,6 +294,7 @@ export const listReservasAuditorio = async () => {
         observaciones: row.observaciones,
         estado: row.estado,
         fechaCreacion: row.fecha_creacion,
+        encargados: [],
         horarios: row.horario_id && row.fecha_especifica && row.hora_inicio && row.hora_fin
           ? [{
               id: row.horario_id,
@@ -197,11 +317,172 @@ export const listReservasAuditorio = async () => {
     }
   }
 
+  const encargadosRows = await prisma.$queryRaw<Array<{
+    reserva_id: string;
+    staff_id: string;
+    cedula: string;
+    numero_staff: number;
+    nombres: string;
+    apellidos: string;
+    rol: string;
+    estado: string;
+  }>>`
+    SELECT
+      a.reserva_id::text AS reserva_id,
+      s.id::text AS staff_id,
+      s.cedula,
+      s.numero_staff,
+      s.nombres,
+      s.apellidos,
+      s.rol,
+      s.estado::text AS estado
+    FROM public.auditorio_reserva_encargados a
+    INNER JOIN public.staff s ON s.id = a.staff_id
+    ORDER BY a.reserva_id, s.nombres, s.apellidos
+  `;
+
+  for (const row of encargadosRows) {
+    const target = byId.get(row.reserva_id);
+    if (!target) continue;
+
+    target.encargados.push({
+      staffId: row.staff_id,
+      cedula: row.cedula,
+      numeroStaff: Number(row.numero_staff ?? 0),
+      nombreCompleto: `${row.nombres} ${row.apellidos}`.trim(),
+      rol: row.rol,
+      estado: row.estado,
+    });
+  }
+
   return Array.from(byId.values());
+};
+
+export const listUpcomingAuditorioNotifications = async (
+  options?: ListUpcomingAuditorioNotificationsOptions
+): Promise<UpcomingAuditorioNotification[]> => {
+  const now = new Date();
+  const windowStart = new Date(now);
+  const windowEnd = new Date(now.getTime() + 24 * 60 * 60 * 1000);
+
+  // On Friday/Saturday, include all remaining events from the whole weekend.
+  if (now.getDay() === 5 || now.getDay() === 6) {
+    const daysUntilSunday = 7 - now.getDay();
+    windowEnd.setDate(now.getDate() + daysUntilSunday);
+    windowEnd.setHours(23, 59, 59, 999);
+  }
+
+  const startSql = toSqlLocalTimestamp(windowStart);
+  const endSql = toSqlLocalTimestamp(windowEnd);
+
+  const rows = await prisma.$queryRaw<
+    Array<{
+      reserva_id: string;
+      horario_id: string;
+      nombre_evento: string;
+      organizador: string;
+      estado: AuditorioEstado;
+      fecha_especifica: string;
+      hora_inicio: string;
+      hora_fin: string;
+      starts_at: string;
+      ends_at: string;
+    }>
+  >`
+    SELECT
+      r.id::text AS reserva_id,
+      h.id::text AS horario_id,
+      r.nombre_evento,
+      r.organizador,
+      r.estado,
+      TO_CHAR(h.fecha_especifica, 'YYYY-MM-DD') AS fecha_especifica,
+      TO_CHAR(h.hora_inicio, 'HH24:MI') AS hora_inicio,
+      TO_CHAR(h.hora_fin, 'HH24:MI') AS hora_fin,
+      TO_CHAR((h.fecha_especifica + h.hora_inicio), 'YYYY-MM-DD"T"HH24:MI:SS') AS starts_at,
+      TO_CHAR((h.fecha_especifica + h.hora_fin), 'YYYY-MM-DD"T"HH24:MI:SS') AS ends_at
+    FROM public.reservas_auditorio r
+    INNER JOIN public.horarios_intercalados_auditorio h ON h.reserva_id = r.id
+    WHERE r.estado <> 'Cancelada'::public.auditorio_estado_enum
+      AND (
+        (h.fecha_especifica + h.hora_inicio) BETWEEN ${startSql}::timestamp AND ${endSql}::timestamp
+        OR (${startSql}::timestamp BETWEEN (h.fecha_especifica + h.hora_inicio) AND (h.fecha_especifica + h.hora_fin))
+      )
+    ORDER BY (h.fecha_especifica + h.hora_inicio) ASC, h.hora_fin ASC
+  `;
+
+  const reservationIds = Array.from(new Set(rows.map((row) => row.reserva_id)));
+  const encargadosByReserva = new Map<string, AuditorioEncargado[]>();
+
+  if (reservationIds.length > 0) {
+    const encargadosRows = await prisma.$queryRaw<Array<{
+      reserva_id: string;
+      staff_id: string;
+      cedula: string;
+      numero_staff: number;
+      nombres: string;
+      apellidos: string;
+      rol: string;
+      estado: string;
+    }>>`
+      SELECT
+        a.reserva_id::text AS reserva_id,
+        s.id::text AS staff_id,
+        s.cedula,
+        s.numero_staff,
+        s.nombres,
+        s.apellidos,
+        s.rol,
+        s.estado::text AS estado
+      FROM public.auditorio_reserva_encargados a
+      INNER JOIN public.staff s ON s.id = a.staff_id
+      WHERE a.reserva_id::text = ANY(${reservationIds})
+      ORDER BY a.reserva_id, s.nombres, s.apellidos
+    `;
+
+    for (const row of encargadosRows) {
+      const bucket = encargadosByReserva.get(row.reserva_id) ?? [];
+      bucket.push({
+        staffId: row.staff_id,
+        cedula: row.cedula,
+        numeroStaff: Number(row.numero_staff ?? 0),
+        nombreCompleto: `${row.nombres} ${row.apellidos}`.trim(),
+        rol: row.rol,
+        estado: row.estado,
+      });
+      encargadosByReserva.set(row.reserva_id, bucket);
+    }
+  }
+
+  const nowTime = now.getTime();
+
+  return rows
+    .filter((row) => {
+      if (!options?.assignedStaffId) {
+        return true;
+      }
+
+      const workers = encargadosByReserva.get(row.reserva_id) ?? [];
+      return workers.some((worker) => worker.staffId === options.assignedStaffId);
+    })
+    .map((row) => ({
+    id: `${row.reserva_id}:${row.horario_id}`,
+    reservaId: row.reserva_id,
+    nombreEvento: row.nombre_evento,
+    organizador: row.organizador,
+    estado: row.estado,
+    fechaEspecifica: row.fecha_especifica,
+    horaInicio: row.hora_inicio,
+    horaFin: row.hora_fin,
+    startsAt: row.starts_at,
+    notificationType: nowTime >= new Date(row.starts_at).getTime() && nowTime <= new Date(row.ends_at).getTime() ? "en_curso" : "proximo",
+    assignedWorkers: encargadosByReserva.get(row.reserva_id) ?? [],
+  }));
 };
 
 export const createReservaAuditorio = async (payload: CreateReservaAuditorioInput) => {
   return prisma.$transaction(async (tx) => {
+    await ensureAuditorioEncargadosTableReady();
+
     const requerimientosColumns = await getAuditorioRequerimientosColumns();
     const columns = [
       "nombre_evento",
@@ -288,12 +569,16 @@ export const createReservaAuditorio = async (payload: CreateReservaAuditorioInpu
       `;
     }
 
+    await syncReservaEncargadosTx(tx, reservaId, payload.encargadoStaffIds);
+
     return { reservaId };
   });
 };
 
 export const updateReservaAuditorio = async (payload: UpdateReservaAuditorioInput) => {
   return prisma.$transaction(async (tx) => {
+    await ensureAuditorioEncargadosTableReady();
+
     const requerimientosColumns = await getAuditorioRequerimientosColumns();
     const assignments = [
       "nombre_evento = $1",
@@ -375,6 +660,8 @@ export const updateReservaAuditorio = async (payload: UpdateReservaAuditorioInpu
       `;
     }
 
+    await syncReservaEncargadosTx(tx, payload.id, payload.encargadoStaffIds);
+
     return { reservaId: payload.id };
   });
 };
@@ -428,6 +715,7 @@ export const buildReservasAuditorioHistoryExcel = async () => {
           "Monitor": reserva.requiereMonitor ? "Si" : "No",
           "Proyector": reserva.requiereProyector ? "Si" : "No",
           "Filtro Agua": reserva.requiereFiltroAgua ? "Si" : "No",
+          "Encargados": reserva.encargados.map((item) => item.nombreCompleto).join(", "),
           "Fecha Bloque": "",
           "Hora Inicio Bloque": "",
           "Hora Fin Bloque": "",
@@ -450,6 +738,7 @@ export const buildReservasAuditorioHistoryExcel = async () => {
       "Monitor": reserva.requiereMonitor ? "Si" : "No",
       "Proyector": reserva.requiereProyector ? "Si" : "No",
       "Filtro Agua": reserva.requiereFiltroAgua ? "Si" : "No",
+      "Encargados": reserva.encargados.map((item) => item.nombreCompleto).join(", "),
       "Fecha Bloque": horario.fechaEspecifica,
       "Hora Inicio Bloque": horario.horaInicio,
       "Hora Fin Bloque": horario.horaFin,
