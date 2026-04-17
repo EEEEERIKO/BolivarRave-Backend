@@ -1459,73 +1459,160 @@ export const clearAllSchedules = async (requestedBy = "schedules-ui") => {
 };
 
 export const getScheduleEvents = async () => {
-  await ensureSlotExceptionsTableReady();
-  await ensureScheduleRequestsTableReady();
+  // En entornos con permisos restringidos, la creación/consulta de tablas auxiliares
+  // puede fallar. Este endpoint debe seguir devolviendo eventos base.
+  try {
+    await ensureSlotExceptionsTableReady();
+  } catch (error) {
+    console.warn("[schedules] No fue posible asegurar horarios_evento_excepciones:", error);
+  }
 
-  const events = await prisma.$queryRaw<
-    Array<{
-      evento_id: string;
-      horario_id: string;
-      request_id: string | null;
-      day: string;
-      room: string;
-      start: string;
-      end: string;
-      faculty: string;
-      code: string;
-      subject: string;
-      teacher: string;
-      start_date: string;
-      end_date: string;
-      tipo_reserva_id: number;
-      request_status: ScheduleRequestStatus | null;
-    }>
-  >`
-    SELECT
-      e.id::text AS evento_id,
-      h.id::text AS horario_id,
-      h.dia_semana::text AS day,
-      s.nombre_bloque AS room,
-      TO_CHAR(h.hora_inicio, 'HH24:MI') AS start,
-      TO_CHAR(h.hora_fin, 'HH24:MI') AS "end",
-      COALESCE(f.nombre, 'Reserva') AS faculty,
-      COALESCE(e.codigo_materia, 'RESERVA') AS code,
-      e.nombre_principal AS subject,
-      e.responsable AS teacher,
-      TO_CHAR(e.fecha_inicio, 'YYYY-MM-DD') AS start_date,
-      TO_CHAR(e.fecha_fin, 'YYYY-MM-DD') AS end_date,
-      e.tipo_reserva_id,
-      sr.id::text AS request_id,
-      sr.estado AS request_status
-    FROM public.eventos e
-    INNER JOIN public.horarios_evento h ON h.evento_id = e.id
-    INNER JOIN public.salones s ON s.id = h.salon_id
-    LEFT JOIN public.facultades f ON f.id = e.facultad_id
-    LEFT JOIN public.solicitudes_salon sr ON sr.evento_id = e.id
-    WHERE COALESCE(sr.estado, 'aprobada') <> 'rechazada'
-    ORDER BY e.nombre_principal ASC
-  `;
+  try {
+    await ensureScheduleRequestsTableReady();
+  } catch (error) {
+    console.warn("[schedules] No fue posible asegurar solicitudes_salon:", error);
+  }
 
-  const overrides = await prisma.$queryRaw<
-    Array<{
-      horario_id: string;
-      date: string;
-      day: string;
-      room: string;
-      start: string;
-      end: string;
-    }>
-  >`
-    SELECT
-      x.horario_id::text AS horario_id,
-      TO_CHAR(x.fecha, 'YYYY-MM-DD') AS date,
-      x.dia_semana::text AS day,
-      s.nombre_bloque AS room,
-      TO_CHAR(x.hora_inicio, 'HH24:MI') AS start,
-      TO_CHAR(x.hora_fin, 'HH24:MI') AS "end"
-    FROM public.horarios_evento_excepciones x
-    INNER JOIN public.salones s ON s.id = x.salon_id
-  `;
+  let events: Array<{
+    evento_id: string;
+    horario_id: string;
+    request_id: string | null;
+    day: string;
+    room: string;
+    start: string;
+    end: string;
+    faculty: string;
+    code: string;
+    subject: string;
+    teacher: string;
+    start_date: string;
+    end_date: string;
+    tipo_reserva_id: number;
+    request_status: ScheduleRequestStatus | null;
+  }> = [];
+
+  try {
+    events = await prisma.$queryRaw<
+      Array<{
+        evento_id: string;
+        horario_id: string;
+        request_id: string | null;
+        day: string;
+        room: string;
+        start: string;
+        end: string;
+        faculty: string;
+        code: string;
+        subject: string;
+        teacher: string;
+        start_date: string;
+        end_date: string;
+        tipo_reserva_id: number;
+        request_status: ScheduleRequestStatus | null;
+      }>
+    >`
+      SELECT
+        e.id::text AS evento_id,
+        h.id::text AS horario_id,
+        h.dia_semana::text AS day,
+        s.nombre_bloque AS room,
+        TO_CHAR(h.hora_inicio, 'HH24:MI') AS start,
+        TO_CHAR(h.hora_fin, 'HH24:MI') AS "end",
+        COALESCE(f.nombre, 'Reserva') AS faculty,
+        COALESCE(e.codigo_materia, 'RESERVA') AS code,
+        e.nombre_principal AS subject,
+        e.responsable AS teacher,
+        TO_CHAR(e.fecha_inicio, 'YYYY-MM-DD') AS start_date,
+        TO_CHAR(e.fecha_fin, 'YYYY-MM-DD') AS end_date,
+        e.tipo_reserva_id,
+        sr.id::text AS request_id,
+        sr.estado AS request_status
+      FROM public.eventos e
+      INNER JOIN public.horarios_evento h ON h.evento_id = e.id
+      INNER JOIN public.salones s ON s.id = h.salon_id
+      LEFT JOIN public.facultades f ON f.id = e.facultad_id
+      LEFT JOIN public.solicitudes_salon sr ON sr.evento_id = e.id
+      WHERE COALESCE(sr.estado, 'aprobada') <> 'rechazada'
+      ORDER BY e.nombre_principal ASC
+    `;
+  } catch (error) {
+    console.warn("[schedules] Fallback sin solicitudes_salon:", error);
+    events = await prisma.$queryRaw<
+      Array<{
+        evento_id: string;
+        horario_id: string;
+        request_id: string | null;
+        day: string;
+        room: string;
+        start: string;
+        end: string;
+        faculty: string;
+        code: string;
+        subject: string;
+        teacher: string;
+        start_date: string;
+        end_date: string;
+        tipo_reserva_id: number;
+        request_status: ScheduleRequestStatus | null;
+      }>
+    >`
+      SELECT
+        e.id::text AS evento_id,
+        h.id::text AS horario_id,
+        h.dia_semana::text AS day,
+        s.nombre_bloque AS room,
+        TO_CHAR(h.hora_inicio, 'HH24:MI') AS start,
+        TO_CHAR(h.hora_fin, 'HH24:MI') AS "end",
+        COALESCE(f.nombre, 'Reserva') AS faculty,
+        COALESCE(e.codigo_materia, 'RESERVA') AS code,
+        e.nombre_principal AS subject,
+        e.responsable AS teacher,
+        TO_CHAR(e.fecha_inicio, 'YYYY-MM-DD') AS start_date,
+        TO_CHAR(e.fecha_fin, 'YYYY-MM-DD') AS end_date,
+        e.tipo_reserva_id,
+        NULL::text AS request_id,
+        NULL::text AS request_status
+      FROM public.eventos e
+      INNER JOIN public.horarios_evento h ON h.evento_id = e.id
+      INNER JOIN public.salones s ON s.id = h.salon_id
+      LEFT JOIN public.facultades f ON f.id = e.facultad_id
+      ORDER BY e.nombre_principal ASC
+    `;
+  }
+
+  let overrides: Array<{
+    horario_id: string;
+    date: string;
+    day: string;
+    room: string;
+    start: string;
+    end: string;
+  }> = [];
+
+  try {
+    overrides = await prisma.$queryRaw<
+      Array<{
+        horario_id: string;
+        date: string;
+        day: string;
+        room: string;
+        start: string;
+        end: string;
+      }>
+    >`
+      SELECT
+        x.horario_id::text AS horario_id,
+        TO_CHAR(x.fecha, 'YYYY-MM-DD') AS date,
+        x.dia_semana::text AS day,
+        s.nombre_bloque AS room,
+        TO_CHAR(x.hora_inicio, 'HH24:MI') AS start,
+        TO_CHAR(x.hora_fin, 'HH24:MI') AS "end"
+      FROM public.horarios_evento_excepciones x
+      INNER JOIN public.salones s ON s.id = x.salon_id
+    `;
+  } catch (error) {
+    console.warn("[schedules] Fallback sin horarios_evento_excepciones:", error);
+  }
 
   const overridesBySlot = new Map<string, Array<{ date: string; day: string; room: string; start: string; end: string }>>();
 
