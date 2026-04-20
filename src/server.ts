@@ -102,6 +102,7 @@ const PUBLIC_API_PATHS = new Set([
   "/health",
   "/ws-status",
   "/staff/login",
+  "/schedules/state",
 ]);
 
 app.use("/api", (req, res, next) => {

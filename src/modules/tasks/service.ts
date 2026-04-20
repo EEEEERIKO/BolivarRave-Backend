@@ -289,6 +289,7 @@ export type TareaInstanciaResumen = {
   tareaNombre: string;
   estado: TareaEstado;
   prioridad: TareaPrioridad;
+  tiempoEstimadoMin: number;
   fechaProgramada: string;
   horaProgramada: string;
   salonId: string | null;
@@ -422,6 +423,7 @@ type InstanciaRow = {
   tarea_nombre: string;
   estado: TareaEstado;
   prioridad: TareaPrioridad;
+  tiempo_estimado_min: number;
   fecha_programada: string;
   hora_programada: string;
   salon_id: string | null;
@@ -1123,6 +1125,7 @@ export const listTaskInstances = async (estado?: TareaEstado) => {
         tc.nombre AS tarea_nombre,
         ti.estado::text AS estado,
         ti.prioridad::text AS prioridad,
+        tc.tiempo_estimado_min,
         TO_CHAR(ti.fecha_programada, 'YYYY-MM-DD') AS fecha_programada,
         TO_CHAR(ti.hora_programada, 'HH24:MI') AS hora_programada,
         ti.salon_id::text AS salon_id,
@@ -1156,6 +1159,7 @@ export const listTaskInstances = async (estado?: TareaEstado) => {
         tc.nombre AS tarea_nombre,
         ti.estado::text AS estado,
         ti.prioridad::text AS prioridad,
+        tc.tiempo_estimado_min,
         TO_CHAR(ti.fecha_programada, 'YYYY-MM-DD') AS fecha_programada,
         TO_CHAR(ti.hora_programada, 'HH24:MI') AS hora_programada,
         ti.salon_id::text AS salon_id,
@@ -1188,6 +1192,7 @@ export const listTaskInstances = async (estado?: TareaEstado) => {
     tareaNombre: row.tarea_nombre,
     estado: row.estado,
     prioridad: row.prioridad,
+    tiempoEstimadoMin: row.tiempo_estimado_min,
     fechaProgramada: row.fecha_programada,
     horaProgramada: row.hora_programada,
     salonId: row.salon_id,
