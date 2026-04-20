@@ -213,6 +213,10 @@ tasksRouter.post("/spaces", requireAdminKey, async (req, res, next) => {
       return res.status(400).json({ error: `Payload invalido: ${error.issues[0]?.message ?? "error de validacion"}` });
     }
 
+    if (error instanceof Error && error.message.toLowerCase().includes("conflicto de horario")) {
+      return res.status(400).json({ error: error.message });
+    }
+
     return next(error);
   }
 });
@@ -230,6 +234,10 @@ tasksRouter.put("/spaces/:id", requireAdminKey, async (req, res, next) => {
   } catch (error) {
     if (error instanceof z.ZodError) {
       return res.status(400).json({ error: `Payload invalido: ${error.issues[0]?.message ?? "error de validacion"}` });
+    }
+
+    if (error instanceof Error && error.message.toLowerCase().includes("conflicto de horario")) {
+      return res.status(400).json({ error: error.message });
     }
 
     return next(error);
@@ -250,6 +258,10 @@ tasksRouter.delete("/spaces/:id", requireAdminKey, async (req, res, next) => {
       return res.status(400).json({ error: `Payload invalido: ${error.issues[0]?.message ?? "error de validacion"}` });
     }
 
+    if (error instanceof Error && error.message.toLowerCase().includes("conflicto de horario")) {
+      return res.status(400).json({ error: error.message });
+    }
+
     return next(error);
   }
 });
@@ -266,6 +278,10 @@ tasksRouter.post("/skills", requireAdminKey, async (req, res, next) => {
   } catch (error) {
     if (error instanceof z.ZodError) {
       return res.status(400).json({ error: `Payload invalido: ${error.issues[0]?.message ?? "error de validacion"}` });
+    }
+
+    if (error instanceof Error && error.message.toLowerCase().includes("conflicto de horario")) {
+      return res.status(400).json({ error: error.message });
     }
 
     return next(error);

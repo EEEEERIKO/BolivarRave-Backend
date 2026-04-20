@@ -486,7 +486,192 @@ export const listTaskCatalog = async () => {
   } satisfies CatalogoTask));
 };
 
+const assertNoAssignedStaffScheduleConflict = async (
+  tx: Prisma.TransactionClient,
+  payload: CreateCatalogTaskInput,
+  options?: { excludeTaskId?: string },
+) => {
+  const parseTimeToMinutes = (time: string | null): number | null => {
+    if (!time) return null;
+    const [hh = "", mm = ""] = time.split(":");
+    const hours = Number(hh);
+    const minutes = Number(mm);
+    if (!Number.isFinite(hours) || !Number.isFinite(minutes)) return null;
+    if (hours < 0 || hours > 23 || minutes < 0 || minutes > 59) return null;
+    return hours * 60 + minutes;
+  };
+
+  const intervalSegments = (startMin: number, durationMin: number): Array<{ start: number; end: number }> => {
+    const normalizedStart = ((startMin % 1440) + 1440) % 1440;
+    const safeDuration = Math.max(0, Math.min(durationMin, 1440));
+    const end = normalizedStart + safeDuration;
+
+    if (end <= 1440) {
+      return [{ start: normalizedStart, end }];
+    }
+
+    return [
+      { start: normalizedStart, end: 1440 },
+      { start: 0, end: end - 1440 },
+    ];
+  };
+
+  const intervalsOverlap = (aStart: number, aDuration: number, bStart: number, bDuration: number): boolean => {
+    const aSegments = intervalSegments(aStart, aDuration);
+    const bSegments = intervalSegments(bStart, bDuration);
+
+    for (const a of aSegments) {
+      for (const b of bSegments) {
+        if (a.start < b.end && a.end > b.start) {
+          return true;
+        }
+      }
+    }
+
+    return false;
+  };
+
+  const dayFromDate = (dateText: string | null): number | null => {
+    if (!dateText) return null;
+    const date = new Date(`${dateText}T00:00:00`);
+    if (Number.isNaN(date.getTime())) return null;
+    return date.getDay();
+  };
+
+  const getIncomingSlots = () => {
+    if (payload.tipo === "Recurrente") {
+      const startMin = parseTimeToMinutes(payload.horaProgramada);
+      if (startMin === null || payload.diasSemana.length === 0) {
+        return { recurrentDays: new Set<number>(), sporadicDate: null as string | null, startMin: null as number | null };
+      }
+      return {
+        recurrentDays: new Set(payload.diasSemana),
+        sporadicDate: null as string | null,
+        startMin,
+      };
+    }
+
+    const startMin = parseTimeToMinutes(payload.horaEsporadica);
+    if (startMin === null || !payload.fechaEsporadica) {
+      return { recurrentDays: new Set<number>(), sporadicDate: null as string | null, startMin: null as number | null };
+    }
+
+    return {
+      recurrentDays: new Set<number>(),
+      sporadicDate: payload.fechaEsporadica,
+      startMin,
+    };
+  };
+
+  if (payload.staffAsignadosIds.length === 0) {
+    return;
+  }
+
+  const uniqueStaffIds = Array.from(new Set(payload.staffAsignadosIds));
+  const excludeTaskId = options?.excludeTaskId ?? null;
+  const incoming = getIncomingSlots();
+
+  if (incoming.startMin === null) {
+    return;
+  }
+
+  const existingAssignments = await tx.$queryRaw<Array<{
+    staff_id: string;
+    staff_nombre: string;
+    tarea_id: string;
+    tarea_nombre: string;
+    sector: string;
+    tipo: string;
+    dias_semana: number[];
+    fecha_esporadica: string | null;
+    hora_programada: string | null;
+    hora_esporadica: string | null;
+    tiempo_estimado_min: number;
+  }>>`
+    SELECT
+      tcs.staff_id::text AS staff_id,
+      COALESCE(s.nombres || ' ' || s.apellidos, tcs.staff_id::text) AS staff_nombre,
+      tc.id::text AS tarea_id,
+      tc.nombre AS tarea_nombre,
+      tc.sector,
+      tc.tipo::text AS tipo,
+      COALESCE(tc.dias_semana, ARRAY[]::smallint[])::int[] AS dias_semana,
+      TO_CHAR(tc.fecha_esporadica, 'YYYY-MM-DD') AS fecha_esporadica,
+      TO_CHAR(tc.hora_programada, 'HH24:MI') AS hora_programada,
+      TO_CHAR(tc.hora_esporadica, 'HH24:MI') AS hora_esporadica,
+      tc.tiempo_estimado_min
+    FROM public.tareas_catalogo tc
+    INNER JOIN public.tareas_catalogo_staff tcs ON tcs.tarea_catalogo_id = tc.id
+    LEFT JOIN public.staff s ON s.id = tcs.staff_id
+    WHERE tcs.staff_id = ANY(${uniqueStaffIds}::uuid[])
+      AND (${excludeTaskId}::uuid IS NULL OR tc.id <> ${excludeTaskId}::uuid)
+      AND (
+        (tc.tipo = 'Recurrente'::public.tarea_tipo_enum AND tc.hora_programada IS NOT NULL)
+        OR
+        (tc.tipo = 'Esporadica'::public.tarea_tipo_enum AND tc.fecha_esporadica IS NOT NULL AND tc.hora_esporadica IS NOT NULL)
+      )
+  `;
+
+  for (const existing of existingAssignments) {
+    const existingDays = Array.isArray(existing.dias_semana)
+      ? existing.dias_semana.map((day) => Number(day)).filter((day) => Number.isInteger(day) && day >= 0 && day <= 6)
+      : [];
+
+    const existingStart = parseTimeToMinutes(existing.tipo === "Recurrente" ? existing.hora_programada : existing.hora_esporadica);
+    if (existingStart === null) {
+      continue;
+    }
+
+    const sameScheduleContext = (() => {
+      if (payload.tipo === "Recurrente" && existing.tipo === "Recurrente") {
+        const existingDaysSet = new Set(existingDays);
+        for (const day of incoming.recurrentDays) {
+          if (existingDaysSet.has(day)) {
+            return true;
+          }
+        }
+        return false;
+      }
+
+      if (payload.tipo === "Esporadica" && existing.tipo === "Esporadica") {
+        return Boolean(incoming.sporadicDate && incoming.sporadicDate === existing.fecha_esporadica);
+      }
+
+      if (payload.tipo === "Recurrente" && existing.tipo === "Esporadica") {
+        const existingDay = dayFromDate(existing.fecha_esporadica);
+        return existingDay !== null && incoming.recurrentDays.has(existingDay);
+      }
+
+      if (payload.tipo === "Esporadica" && existing.tipo === "Recurrente") {
+        const incomingDay = dayFromDate(incoming.sporadicDate);
+        return incomingDay !== null && existingDays.includes(incomingDay);
+      }
+
+      return false;
+    })();
+
+    if (!sameScheduleContext) {
+      continue;
+    }
+
+    if (
+      intervalsOverlap(
+        incoming.startMin,
+        payload.tiempoEstimadoMin,
+        existingStart,
+        existing.tiempo_estimado_min,
+      )
+    ) {
+      throw new Error(
+        `Conflicto de horario: ${existing.staff_nombre} ya tiene asignada la tarea "${existing.tarea_nombre}" (${existing.sector}) en un rango horario que se solapa.`,
+      );
+    }
+  }
+};
+
 const createCatalogTaskRecord = async (tx: Prisma.TransactionClient, payload: CreateCatalogTaskInput) => {
+  await assertNoAssignedStaffScheduleConflict(tx, payload);
+
   const created = await tx.$queryRaw<Array<{ id: string }>>`
     INSERT INTO public.tareas_catalogo (
       nombre,
@@ -586,6 +771,8 @@ export const createTaskCatalogBatch = async (payload: CreateCatalogTaskBatchInpu
 
 export const updateTaskCatalog = async (payload: UpdateCatalogTaskInput) => {
   return prisma.$transaction(async (tx) => {
+    await assertNoAssignedStaffScheduleConflict(tx, payload, { excludeTaskId: payload.id });
+
     const updated = await tx.$queryRaw<Array<{ id: string }>>`
       UPDATE public.tareas_catalogo
       SET

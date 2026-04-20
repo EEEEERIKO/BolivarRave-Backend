@@ -9,12 +9,14 @@ import {
   clearAllSchedules,
   createScheduleEvent,
   deleteScheduleEventSlot,
+  deletePendingScheduleRequest,
   findAvailableRooms,
   getImportsHistory,
   getRooms,
   getScheduleEvents,
   getPendingScheduleRequests,
   replaceAllSchedulesFromRows,
+  updatePendingScheduleRequest,
   updateScheduleRequestStatus,
   updateScheduleEventSlot,
 } from "./service";
@@ -123,6 +125,8 @@ const availableRoomsQuerySchema = z.object({
 const requestStatusSchema = z.object({
   status: z.enum(["aprobada", "rechazada"]),
 });
+
+const requestEditBodySchema = createEventSchema;
 
 type RoomsInfoRawRow = {
   salon_id: string;
@@ -572,6 +576,93 @@ schedulesRouter.post("/requests", requireAdminOrMonitorRole, async (req, res, ne
     if (error instanceof z.ZodError) {
       return res.status(400).json({
         error: `Payload de solicitud invalido: ${error.issues[0]?.message ?? "error de validacion"}`,
+      });
+    }
+
+    if (handleKnownScheduleWriteError(error, res)) {
+      return;
+    }
+
+    return next(error);
+  }
+});
+
+schedulesRouter.put("/requests/:requestId", requireAdminOrMonitorRole, async (req, res, next) => {
+  try {
+    const params = z.object({ requestId: z.string().uuid() }).parse(req.params);
+    const authUser = (req as AuthenticatedRequest).authUser;
+    if (!authUser) {
+      return res.status(401).json({ error: "No autorizado" });
+    }
+
+    const parsed = requestEditBodySchema.parse(req.body);
+    if (parsed.slots.length !== 1) {
+      return res.status(400).json({ error: "Las solicitudes de salón deben tener un único horario." });
+    }
+
+    const updated = await updatePendingScheduleRequest(params.requestId, {
+      reservationType: parsed.reservationType,
+      faculty: parsed.faculty,
+      code: parsed.code,
+      subject: parsed.subject,
+      teacher: parsed.teacher,
+      startDate: toLocalDate(parsed.startDate),
+      endDate: toLocalDate(parsed.endDate),
+      slots: parsed.slots.map((slot) => ({
+        day: slot.day,
+        room: slot.room,
+        startTime: slot.start,
+        endTime: slot.end,
+      })),
+      requestStatus: "pendiente",
+      requestedByStaffId: authUser.staffId,
+      requestedByName: authUser.name,
+      requestedByRole: authUser.role,
+    }, {
+      staffId: authUser.staffId,
+      role: authUser.role as "admin" | "monitor",
+      name: authUser.name,
+    });
+
+    broadcastScheduleRefresh();
+
+    return res.json({ message: "Solicitud actualizada correctamente", requestId: updated.requestId, eventId: updated.eventId });
+  } catch (error) {
+    if (error instanceof z.ZodError) {
+      return res.status(400).json({
+        error: `Payload de solicitud invalido: ${error.issues[0]?.message ?? "error de validacion"}`,
+      });
+    }
+
+    if (handleKnownScheduleWriteError(error, res)) {
+      return;
+    }
+
+    return next(error);
+  }
+});
+
+schedulesRouter.delete("/requests/:requestId", requireAdminOrMonitorRole, async (req, res, next) => {
+  try {
+    const params = z.object({ requestId: z.string().uuid() }).parse(req.params);
+    const authUser = (req as AuthenticatedRequest).authUser;
+    if (!authUser) {
+      return res.status(401).json({ error: "No autorizado" });
+    }
+
+    const deleted = await deletePendingScheduleRequest(params.requestId, {
+      staffId: authUser.staffId,
+      role: authUser.role as "admin" | "monitor",
+      name: authUser.name,
+    });
+
+    broadcastScheduleRefresh();
+
+    return res.json({ message: "Solicitud eliminada correctamente", requestId: deleted.requestId, eventId: deleted.eventId });
+  } catch (error) {
+    if (error instanceof z.ZodError) {
+      return res.status(400).json({
+        error: `Parametros invalidos: ${error.issues[0]?.message ?? "error de validacion"}`,
       });
     }
 

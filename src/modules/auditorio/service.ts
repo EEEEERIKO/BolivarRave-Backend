@@ -45,11 +45,26 @@ export type UpcomingAuditorioNotification = {
   nombreEvento: string;
   organizador: string;
   estado: AuditorioEstado;
+  fechaInicioPeriodo: string;
+  fechaFinPeriodo: string;
+  numeroAsistentes: number;
+  requierePantalla: boolean;
+  requiereSonido: boolean;
+  requiereMonitor: boolean;
+  requiereProyector: boolean;
+  requiereFiltroAgua: boolean;
+  observaciones: string | null;
   fechaEspecifica: string;
   horaInicio: string;
   horaFin: string;
   startsAt: string;
   notificationType: "en_curso" | "proximo";
+  horarios: Array<{
+    id: string;
+    fechaEspecifica: string;
+    horaInicio: string;
+    horaFin: string;
+  }>;
   assignedWorkers: AuditorioEncargado[];
 };
 
@@ -58,6 +73,18 @@ type ListUpcomingAuditorioNotificationsOptions = {
 };
 
 const toIsoDate = (value: Date) => value.toISOString().slice(0, 10);
+
+const previousBusinessDay = (value: Date) => {
+  const result = new Date(value);
+  result.setHours(0, 0, 0, 0);
+  result.setDate(result.getDate() - 1);
+
+  while (result.getDay() === 0 || result.getDay() === 6) {
+    result.setDate(result.getDate() - 1);
+  }
+
+  return result;
+};
 
 type AuditorioRequerimientosColumns = {
   requiereMonitor: string | null;
@@ -363,14 +390,11 @@ export const listUpcomingAuditorioNotifications = async (
 ): Promise<UpcomingAuditorioNotification[]> => {
   const now = new Date();
   const windowStart = new Date(now);
-  const windowEnd = new Date(now.getTime() + 24 * 60 * 60 * 1000);
+  windowStart.setHours(0, 0, 0, 0);
 
-  // On Friday/Saturday, include all remaining events from the whole weekend.
-  if (now.getDay() === 5 || now.getDay() === 6) {
-    const daysUntilSunday = 7 - now.getDay();
-    windowEnd.setDate(now.getDate() + daysUntilSunday);
-    windowEnd.setHours(23, 59, 59, 999);
-  }
+  const windowEnd = new Date(windowStart);
+  windowEnd.setDate(windowEnd.getDate() + 7);
+  windowEnd.setHours(23, 59, 59, 999);
 
   const startSql = toSqlLocalTimestamp(windowStart);
   const endSql = toSqlLocalTimestamp(windowEnd);
@@ -412,8 +436,116 @@ export const listUpcomingAuditorioNotifications = async (
 
   const reservationIds = Array.from(new Set(rows.map((row) => row.reserva_id)));
   const encargadosByReserva = new Map<string, AuditorioEncargado[]>();
+  const horariosByReserva = new Map<string, Array<{ id: string; fechaEspecifica: string; horaInicio: string; horaFin: string }>>();
+  const reservaById = new Map<string, {
+    nombreEvento: string;
+    organizador: string;
+    estado: AuditorioEstado;
+    fechaInicioPeriodo: string;
+    fechaFinPeriodo: string;
+    numeroAsistentes: number;
+    requierePantalla: boolean;
+    requiereSonido: boolean;
+    requiereMonitor: boolean;
+    requiereProyector: boolean;
+    requiereFiltroAgua: boolean;
+    observaciones: string | null;
+  }>();
 
   if (reservationIds.length > 0) {
+    const requerimientosColumns = await getAuditorioRequerimientosColumns();
+    const monitorSelect = requerimientosColumns.requiereMonitor
+      ? `r.${quoteIdentifier(requerimientosColumns.requiereMonitor)} AS requiere_monitor,`
+      : "false AS requiere_monitor,";
+    const proyectorSelect = requerimientosColumns.requiereProyector
+      ? `r.${quoteIdentifier(requerimientosColumns.requiereProyector)} AS requiere_proyector,`
+      : "false AS requiere_proyector,";
+    const filtroAguaSelect = requerimientosColumns.requiereFiltroAgua
+      ? `r.${quoteIdentifier(requerimientosColumns.requiereFiltroAgua)} AS requiere_filtro_agua,`
+      : "false AS requiere_filtro_agua,";
+
+    const reservasRows = await prisma.$queryRawUnsafe<Array<{
+      reserva_id: string;
+      nombre_evento: string;
+      organizador: string;
+      estado: AuditorioEstado;
+      fecha_inicio_periodo: string;
+      fecha_fin_periodo: string;
+      numero_asistentes: number;
+      requiere_pantalla: boolean;
+      requiere_sonido: boolean;
+      requiere_monitor: boolean;
+      requiere_proyector: boolean;
+      requiere_filtro_agua: boolean;
+      observaciones: string | null;
+    }>>(
+      `
+      SELECT
+        r.id::text AS reserva_id,
+        r.nombre_evento,
+        r.organizador,
+        r.estado,
+        TO_CHAR(r.fecha_inicio_periodo, 'YYYY-MM-DD') AS fecha_inicio_periodo,
+        TO_CHAR(r.fecha_fin_periodo, 'YYYY-MM-DD') AS fecha_fin_periodo,
+        r.numero_asistentes,
+        r.requiere_pantalla,
+        r.requiere_sonido,
+        ${monitorSelect}
+        ${proyectorSelect}
+        ${filtroAguaSelect}
+        r.observaciones
+      FROM public.reservas_auditorio r
+      WHERE r.id::text = ANY($1)
+    `,
+      reservationIds
+    );
+
+    for (const row of reservasRows) {
+      reservaById.set(row.reserva_id, {
+        nombreEvento: row.nombre_evento,
+        organizador: row.organizador,
+        estado: row.estado,
+        fechaInicioPeriodo: row.fecha_inicio_periodo,
+        fechaFinPeriodo: row.fecha_fin_periodo,
+        numeroAsistentes: Number(row.numero_asistentes ?? 0),
+        requierePantalla: Boolean(row.requiere_pantalla),
+        requiereSonido: Boolean(row.requiere_sonido),
+        requiereMonitor: Boolean(row.requiere_monitor),
+        requiereProyector: Boolean(row.requiere_proyector),
+        requiereFiltroAgua: Boolean(row.requiere_filtro_agua),
+        observaciones: row.observaciones,
+      });
+    }
+
+    const horariosRows = await prisma.$queryRaw<Array<{
+      reserva_id: string;
+      horario_id: string;
+      fecha_especifica: string;
+      hora_inicio: string;
+      hora_fin: string;
+    }>>`
+      SELECT
+        h.reserva_id::text AS reserva_id,
+        h.id::text AS horario_id,
+        TO_CHAR(h.fecha_especifica, 'YYYY-MM-DD') AS fecha_especifica,
+        TO_CHAR(h.hora_inicio, 'HH24:MI') AS hora_inicio,
+        TO_CHAR(h.hora_fin, 'HH24:MI') AS hora_fin
+      FROM public.horarios_intercalados_auditorio h
+      WHERE h.reserva_id::text = ANY(${reservationIds})
+      ORDER BY h.fecha_especifica ASC, h.hora_inicio ASC
+    `;
+
+    for (const row of horariosRows) {
+      const bucket = horariosByReserva.get(row.reserva_id) ?? [];
+      bucket.push({
+        id: row.horario_id,
+        fechaEspecifica: row.fecha_especifica,
+        horaInicio: row.hora_inicio,
+        horaFin: row.hora_fin,
+      });
+      horariosByReserva.set(row.reserva_id, bucket);
+    }
+
     const encargadosRows = await prisma.$queryRaw<Array<{
       reserva_id: string;
       staff_id: string;
@@ -457,6 +589,14 @@ export const listUpcomingAuditorioNotifications = async (
 
   return rows
     .filter((row) => {
+      const eventDay = new Date(`${row.fecha_especifica}T00:00:00`);
+      const notificationStartMs = previousBusinessDay(eventDay).getTime();
+      const notificationEndMs = new Date(row.ends_at).getTime();
+
+      if (!Number.isFinite(notificationEndMs) || nowTime < notificationStartMs || nowTime > notificationEndMs) {
+        return false;
+      }
+
       if (!options?.assignedStaffId) {
         return true;
       }
@@ -464,19 +604,33 @@ export const listUpcomingAuditorioNotifications = async (
       const workers = encargadosByReserva.get(row.reserva_id) ?? [];
       return workers.some((worker) => worker.staffId === options.assignedStaffId);
     })
-    .map((row) => ({
-    id: `${row.reserva_id}:${row.horario_id}`,
-    reservaId: row.reserva_id,
-    nombreEvento: row.nombre_evento,
-    organizador: row.organizador,
-    estado: row.estado,
-    fechaEspecifica: row.fecha_especifica,
-    horaInicio: row.hora_inicio,
-    horaFin: row.hora_fin,
-    startsAt: row.starts_at,
-    notificationType: nowTime >= new Date(row.starts_at).getTime() && nowTime <= new Date(row.ends_at).getTime() ? "en_curso" : "proximo",
-    assignedWorkers: encargadosByReserva.get(row.reserva_id) ?? [],
-  }));
+    .map((row) => {
+      const reserva = reservaById.get(row.reserva_id);
+
+      return {
+        id: `${row.reserva_id}:${row.horario_id}`,
+        reservaId: row.reserva_id,
+        nombreEvento: reserva?.nombreEvento ?? row.nombre_evento,
+        organizador: reserva?.organizador ?? row.organizador,
+        estado: reserva?.estado ?? row.estado,
+        fechaInicioPeriodo: reserva?.fechaInicioPeriodo ?? row.fecha_especifica,
+        fechaFinPeriodo: reserva?.fechaFinPeriodo ?? row.fecha_especifica,
+        numeroAsistentes: reserva?.numeroAsistentes ?? 0,
+        requierePantalla: reserva?.requierePantalla ?? false,
+        requiereSonido: reserva?.requiereSonido ?? false,
+        requiereMonitor: reserva?.requiereMonitor ?? false,
+        requiereProyector: reserva?.requiereProyector ?? false,
+        requiereFiltroAgua: reserva?.requiereFiltroAgua ?? false,
+        observaciones: reserva?.observaciones ?? null,
+        fechaEspecifica: row.fecha_especifica,
+        horaInicio: row.hora_inicio,
+        horaFin: row.hora_fin,
+        startsAt: row.starts_at,
+        notificationType: nowTime >= new Date(row.starts_at).getTime() && nowTime <= new Date(row.ends_at).getTime() ? "en_curso" : "proximo",
+        horarios: horariosByReserva.get(row.reserva_id) ?? [],
+        assignedWorkers: encargadosByReserva.get(row.reserva_id) ?? [],
+      };
+    });
 };
 
 export const createReservaAuditorio = async (payload: CreateReservaAuditorioInput) => {
