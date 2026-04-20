@@ -5,6 +5,7 @@ import { type AuthenticatedRequest, requireAdminRole, signAuthToken } from "../.
 import {
   authenticateStaffLogin,
   changeStaffPassword,
+  createStaffBalanceMovimiento,
   createStaffPausaProgramada,
   createStaff,
   deleteStaffPausaProgramada,
@@ -13,6 +14,7 @@ import {
   getStaffHorarioLaboral,
   getStaffResumenContrato,
   getStaffById,
+  listStaffBalanceMovimientos,
   listStaffSkills,
   listAllStaffJornadasSemanales,
   listAllStaffPausasProgramadas,
@@ -98,6 +100,17 @@ const pausaBodySchema = z.object({
 const resumenContratoBodySchema = z.object({
   horasSemanalesContrato: z.number().int().min(1).max(168),
   balanceHoras: z.number().min(-10000).max(10000),
+});
+
+const balanceMovimientoBodySchema = z.object({
+  horasDelta: z.number().min(-200).max(200).refine((value) => Math.abs(value) >= 0.01, {
+    message: "El ajuste de horas no puede ser 0.",
+  }),
+  motivo: z.string().trim().max(255).optional(),
+});
+
+const balanceMovimientosQuerySchema = z.object({
+  limit: z.coerce.number().int().min(1).max(200).optional(),
 });
 
 const loginBodySchema = z.object({
@@ -239,6 +252,11 @@ const handleKnownStaffScheduleError = (error: unknown, res: import("express").Re
 
   if (message.includes("debe estar dentro de la jornada") || message.includes("no existe jornada")) {
     res.status(400).json({ error: "La pausa debe pertenecer a un dia laboral y estar dentro del rango de jornada." });
+    return true;
+  }
+
+  if (message.includes("delta") || message.includes("movimiento")) {
+    res.status(400).json({ error: error.message });
     return true;
   }
 
@@ -803,6 +821,65 @@ staffRouter.put("/:id/resumen-contrato", requireAdminRole, async (req, res, next
     return res.json({
       message: "Resumen de contrato actualizado correctamente",
       staffId: updated.staffId,
+    });
+  } catch (error) {
+    if (error instanceof z.ZodError) {
+      return res.status(400).json({
+        error: `Payload invalido: ${error.issues[0]?.message ?? "error de validacion"}`,
+      });
+    }
+
+    if (handleKnownStaffScheduleError(error, res)) {
+      return;
+    }
+
+    return next(error);
+  }
+});
+
+staffRouter.get("/:id/balance-movimientos", async (req, res, next) => {
+  try {
+    const { id } = idParamsSchema.parse(req.params);
+    const { limit } = balanceMovimientosQuerySchema.parse(req.query);
+
+    if (!ensureCollaboradorSelfAccess(req, res, id)) {
+      return;
+    }
+
+    const movimientos = await listStaffBalanceMovimientos(id, limit ?? 50);
+    return res.json({ movimientos });
+  } catch (error) {
+    if (error instanceof z.ZodError) {
+      return res.status(400).json({
+        error: `Parametros invalidos: ${error.issues[0]?.message ?? "error de validacion"}`,
+      });
+    }
+
+    if (handleKnownStaffScheduleError(error, res)) {
+      return;
+    }
+
+    return next(error);
+  }
+});
+
+staffRouter.post("/:id/balance-movimientos", requireAdminRole, async (req, res, next) => {
+  try {
+    const { id } = idParamsSchema.parse(req.params);
+    const parsed = balanceMovimientoBodySchema.parse(req.body);
+    const authUser = (req as AuthenticatedRequest).authUser;
+
+    const created = await createStaffBalanceMovimiento(id, {
+      horasDelta: parsed.horasDelta,
+      ...(parsed.motivo ? { motivo: parsed.motivo } : {}),
+      ...(authUser?.staffId ? { creadoPorStaffId: authUser.staffId } : {}),
+    });
+    broadcastScheduleRefresh();
+
+    return res.status(201).json({
+      message: "Movimiento de horas registrado correctamente",
+      movimiento: created.movement,
+      balanceHoras: created.balanceHoras,
     });
   } catch (error) {
     if (error instanceof z.ZodError) {

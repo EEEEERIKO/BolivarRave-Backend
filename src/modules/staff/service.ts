@@ -107,6 +107,21 @@ type StaffResumenContratoRawRow = {
   balance_horas: number;
 };
 
+type StaffBalanceMovimientoRawRow = {
+  id: string;
+  staff_id: string;
+  horas_delta: number;
+  motivo: string | null;
+  creado_por_staff_id: string | null;
+  created_at: string;
+};
+
+export type StaffBalanceMovimientoInput = {
+  horasDelta: number;
+  motivo?: string;
+  creadoPorStaffId?: string;
+};
+
 type StaffLoginRawRow = {
   id: string;
   role_id: number;
@@ -210,6 +225,18 @@ const ensureStaffHorarioLaboralSchema = async (executor: SqlExecutor) => {
   `;
 
   await executor.$executeRaw`
+    CREATE TABLE IF NOT EXISTS public.staff_balance_movimientos (
+      id uuid PRIMARY KEY DEFAULT gen_random_uuid(),
+      staff_id uuid NOT NULL REFERENCES public.staff(id) ON DELETE CASCADE,
+      horas_delta numeric(8,2) NOT NULL,
+      motivo varchar(255),
+      creado_por_staff_id uuid REFERENCES public.staff(id) ON DELETE SET NULL,
+      created_at timestamptz NOT NULL DEFAULT now(),
+      CONSTRAINT staff_balance_movimientos_delta_chk CHECK (horas_delta <> 0)
+    )
+  `;
+
+  await executor.$executeRaw`
     CREATE INDEX IF NOT EXISTS idx_staff_jornada_staff_id
     ON public.staff_jornada_semanal(staff_id)
   `;
@@ -237,6 +264,16 @@ const ensureStaffHorarioLaboralSchema = async (executor: SqlExecutor) => {
   await executor.$executeRaw`
     CREATE INDEX IF NOT EXISTS idx_staff_pausas_tipo
     ON public.staff_pausas_programadas(tipo_pausa)
+  `;
+
+  await executor.$executeRaw`
+    CREATE INDEX IF NOT EXISTS idx_staff_balance_movimientos_staff_id
+    ON public.staff_balance_movimientos(staff_id)
+  `;
+
+  await executor.$executeRaw`
+    CREATE INDEX IF NOT EXISTS idx_staff_balance_movimientos_created_at
+    ON public.staff_balance_movimientos(created_at DESC)
   `;
 };
 
@@ -951,6 +988,33 @@ export const deleteStaff = async (id: string) => {
   return { staffId: id };
 };
 
+const syncStaffBalanceFromMovimientosTx = async (
+  tx: Pick<typeof prisma, "$queryRaw" | "$executeRaw">,
+  staffId: string,
+) => {
+  const rows = await tx.$queryRaw<Array<{ balance_horas: number | null }>>`
+    SELECT COALESCE(SUM(m.horas_delta), 0)::float8 AS balance_horas
+    FROM public.staff_balance_movimientos m
+    WHERE m.staff_id = ${staffId}::uuid
+  `;
+
+  const resolvedBalance = rows[0]?.balance_horas ?? 0;
+
+  await tx.$executeRaw`
+    UPDATE public.staff
+    SET balance_horas = ${resolvedBalance}
+    WHERE id = ${staffId}::uuid
+  `;
+
+  await tx.$executeRaw`
+    UPDATE public.staff_resumen_contrato
+    SET balance_horas = ${resolvedBalance}
+    WHERE staff_id = ${staffId}::uuid
+  `;
+
+  return resolvedBalance;
+};
+
 const toMinutes = (value: string) => {
   const [hour, minute] = value.split(":").map(Number);
   return (hour ?? 0) * 60 + (minute ?? 0);
@@ -1392,6 +1456,94 @@ export const upsertStaffResumenContrato = async (staffId: string, payload: Staff
   }
 
   return { staffId: updated[0].staff_id };
+};
+
+export const listStaffBalanceMovimientos = async (staffId: string, limit = 50) => {
+  await ensureStaffHorarioLaboralSchemaReady();
+  await assertStaffExists(staffId);
+
+  const safeLimit = Number.isFinite(limit) ? Math.min(Math.max(Math.trunc(limit), 1), 200) : 50;
+
+  const rows = await prisma.$queryRaw<StaffBalanceMovimientoRawRow[]>`
+    SELECT
+      m.id::text AS id,
+      m.staff_id::text AS staff_id,
+      m.horas_delta::float8 AS horas_delta,
+      m.motivo,
+      m.creado_por_staff_id::text AS creado_por_staff_id,
+      TO_CHAR(m.created_at, 'YYYY-MM-DD"T"HH24:MI:SS.MS"Z"') AS created_at
+    FROM public.staff_balance_movimientos m
+    WHERE m.staff_id = ${staffId}::uuid
+    ORDER BY m.created_at DESC, m.id DESC
+    LIMIT ${safeLimit}
+  `;
+
+  return rows.map((row) => ({
+    id: row.id,
+    staffId: row.staff_id,
+    horasDelta: row.horas_delta,
+    motivo: row.motivo,
+    creadoPorStaffId: row.creado_por_staff_id,
+    createdAt: row.created_at,
+  }));
+};
+
+export const createStaffBalanceMovimiento = async (staffId: string, payload: StaffBalanceMovimientoInput) => {
+  await ensureStaffHorarioLaboralSchemaReady();
+
+  return prisma.$transaction(async (tx) => {
+    const existing = await tx.$queryRaw<Array<{ id: string }>>`
+      SELECT id::text AS id
+      FROM public.staff
+      WHERE id = ${staffId}::uuid
+      LIMIT 1
+    `;
+
+    if (!existing[0]?.id) {
+      throw new Error("No se encontro el staff solicitado");
+    }
+
+    const insertedRows = await tx.$queryRaw<StaffBalanceMovimientoRawRow[]>`
+      INSERT INTO public.staff_balance_movimientos (
+        staff_id,
+        horas_delta,
+        motivo,
+        creado_por_staff_id
+      )
+      VALUES (
+        ${staffId}::uuid,
+        ${payload.horasDelta},
+        ${payload.motivo?.trim() ? payload.motivo.trim() : null},
+        ${payload.creadoPorStaffId ?? null}::uuid
+      )
+      RETURNING
+        id::text AS id,
+        staff_id::text AS staff_id,
+        horas_delta::float8 AS horas_delta,
+        motivo,
+        creado_por_staff_id::text AS creado_por_staff_id,
+        TO_CHAR(created_at, 'YYYY-MM-DD"T"HH24:MI:SS.MS"Z"') AS created_at
+    `;
+
+    const movement = insertedRows[0];
+    if (!movement) {
+      throw new Error("No se pudo crear el movimiento de horas");
+    }
+
+    const balanceHoras = await syncStaffBalanceFromMovimientosTx(tx, staffId);
+
+    return {
+      movement: {
+        id: movement.id,
+        staffId: movement.staff_id,
+        horasDelta: movement.horas_delta,
+        motivo: movement.motivo,
+        creadoPorStaffId: movement.creado_por_staff_id,
+        createdAt: movement.created_at,
+      },
+      balanceHoras,
+    };
+  }, { timeout: 20000, maxWait: 10000 });
 };
 
 export const getStaffHorarioLaboral = async (staffId: string) => {

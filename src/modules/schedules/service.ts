@@ -58,6 +58,17 @@ type SearchAvailableRoomsInput = {
   minCapacity: number;
 };
 
+export type SharedScheduleVisualAssignment = {
+  eventId: string;
+  targetDate: string;
+  roomName: string;
+};
+
+export type SharedScheduleState = {
+  disabledRooms: string[];
+  visualAssignments: SharedScheduleVisualAssignment[];
+};
+
 const ensureImportsHistoryTable = async () => {
   await prisma.$executeRawUnsafe(`
     CREATE TABLE IF NOT EXISTS public.schedule_import_history (
@@ -137,6 +148,41 @@ const ensureScheduleRequestsTableReady = async () => {
   }
 
   await ensureScheduleRequestsTablePromise;
+};
+
+const ensureSharedScheduleStateTables = async () => {
+  await prisma.$executeRawUnsafe(`
+    CREATE TABLE IF NOT EXISTS public.schedule_disabled_rooms (
+      room_name text PRIMARY KEY,
+      disabled boolean NOT NULL DEFAULT true,
+      updated_at timestamptz NOT NULL DEFAULT now()
+    )
+  `);
+
+  await prisma.$executeRawUnsafe(`
+    CREATE TABLE IF NOT EXISTS public.schedule_visual_room_assignments (
+      id uuid PRIMARY KEY DEFAULT gen_random_uuid(),
+      event_id uuid NOT NULL,
+      target_date date NOT NULL,
+      room_name text NOT NULL,
+      created_at timestamptz NOT NULL DEFAULT now(),
+      updated_at timestamptz NOT NULL DEFAULT now(),
+      CONSTRAINT schedule_visual_room_assignments_event_date_uq UNIQUE (event_id, target_date)
+    )
+  `);
+};
+
+let ensureSharedScheduleStateTablesPromise: Promise<void> | null = null;
+
+const ensureSharedScheduleStateReady = async () => {
+  if (!ensureSharedScheduleStateTablesPromise) {
+    ensureSharedScheduleStateTablesPromise = ensureSharedScheduleStateTables().catch((error) => {
+      ensureSharedScheduleStateTablesPromise = null;
+      throw error;
+    });
+  }
+
+  await ensureSharedScheduleStateTablesPromise;
 };
 
 let ensureOverlapFunctionPromise: Promise<void> | null = null;
@@ -317,6 +363,14 @@ const cleanText = (value: string) =>
     .replace(/[\u200B-\u200D\uFEFF\uFFFD]/g, "")
     .replace(/\s+/g, " ")
     .trim();
+
+const normalizePersonName = (value: string) =>
+  value
+    .normalize("NFD")
+    .replace(/[\u0300-\u036f]/g, "")
+    .replace(/\s+/g, " ")
+    .trim()
+    .toLowerCase();
 
 const classKey = (row: ParsedScheduleRow) =>
   [
@@ -566,6 +620,31 @@ const toIsoDate = (value: Date) => {
   const month = String(value.getMonth() + 1).padStart(2, "0");
   const day = String(value.getDate()).padStart(2, "0");
   return `${year}-${month}-${day}`;
+};
+
+const getColombiaTodayIsoDate = () => {
+  const formatter = new Intl.DateTimeFormat("en-CA", {
+    timeZone: "America/Bogota",
+    year: "numeric",
+    month: "2-digit",
+    day: "2-digit",
+  });
+
+  const parts = formatter.formatToParts(new Date());
+  const year = parts.find((part) => part.type === "year")?.value ?? "0000";
+  const month = parts.find((part) => part.type === "month")?.value ?? "01";
+  const day = parts.find((part) => part.type === "day")?.value ?? "01";
+
+  return `${year}-${month}-${day}`;
+};
+
+const maxIsoDate = (left: string, right: string) => (left >= right ? left : right);
+
+const previousIsoDate = (isoDate: string) => {
+  const [year, month, day] = isoDate.split("-").map(Number);
+  const date = new Date(year ?? 0, (month ?? 1) - 1, day ?? 1);
+  date.setDate(date.getDate() - 1);
+  return toIsoDate(date);
 };
 
 const weekdayFromIsoDate = (isoDate: string) => {
@@ -1117,9 +1196,8 @@ export const updateScheduleEventSlot = async (payload: UpdateScheduleEventSlotIn
       throw new Error(`Dia invalido en modificacion: '${payload.day}'`);
     }
 
-    // Safety guard: if targetDate is present, this is a single-date update.
-    // This prevents accidental full-series updates when the client scope flag is stale.
-    const updateScope = payload.targetDate ? "week" : payload.updateScope ?? "always";
+    // Prefer explicit scope from client. If absent, fallback to week when targetDate exists.
+    const updateScope = payload.updateScope ?? (payload.targetDate ? "week" : "always");
 
     const roomIdByName = new Map<string, string>();
 
@@ -1142,6 +1220,30 @@ export const updateScheduleEventSlot = async (payload: UpdateScheduleEventSlotIn
       throw new Error("No se encontro el evento a modificar");
     }
 
+    const currentSlotRows = await tx.$queryRaw<Array<{
+      id: string;
+      salon_id: string;
+      dia_semana: string;
+      hora_inicio: string;
+      hora_fin: string;
+    }>>`
+      SELECT
+        h.id::text AS id,
+        h.salon_id::text AS salon_id,
+        h.dia_semana::text AS dia_semana,
+        TO_CHAR(h.hora_inicio, 'HH24:MI') AS hora_inicio,
+        TO_CHAR(h.hora_fin, 'HH24:MI') AS hora_fin
+      FROM public.horarios_evento h
+      WHERE h.id = ${payload.slotId}::uuid
+        AND h.evento_id = ${payload.eventId}::uuid
+      LIMIT 1
+    `;
+
+    const currentSlot = currentSlotRows[0];
+    if (!currentSlot?.id) {
+      throw new Error("No se encontro el horario a modificar");
+    }
+
     const resolvedRoomName = canonicalRoomName(payload.room);
     if (!resolvedRoomName) {
       throw new Error(`El salon '${payload.room}' no pertenece al catalogo oficial`);
@@ -1162,18 +1264,6 @@ export const updateScheduleEventSlot = async (payload: UpdateScheduleEventSlotIn
       }
 
       await ensureSlotExceptionsTableReady();
-
-      const slotOwnership = await tx.$queryRaw<Array<{ id: string }>>`
-        SELECT id::text AS id
-        FROM public.horarios_evento
-        WHERE id = ${payload.slotId}::uuid
-          AND evento_id = ${payload.eventId}::uuid
-        LIMIT 1
-      `;
-
-      if (!slotOwnership[0]?.id) {
-        throw new Error("No se encontro el horario a modificar");
-      }
 
       if (!payload.targetDate) {
         throw new Error("Debes enviar targetDate para modificar solo esta semana");
@@ -1308,18 +1398,103 @@ export const updateScheduleEventSlot = async (payload: UpdateScheduleEventSlotIn
     const materialCode = isIglesiaReservation ? null : payload.code;
     const activity = isIglesiaReservation ? payload.subject : null;
 
-    // Validate overlap with the specific target date if provided
-    await tx.$executeRaw`
-      SELECT public.verificar_solape_horario(
-        ${payload.eventId}::uuid,
-        ${salonId}::uuid,
-        ${canonicalDay}::public.dia_semana_enum,
-        ${payload.startTime}::time,
-        ${payload.endTime}::time,
-        ${payload.slotId}::uuid,
-        ${payload.targetDate ? toIsoDate(payload.targetDate) : null}::date
-      )
-    `;
+    const eventStartIso = currentEventRow.fecha_inicio;
+    const eventEndIso = currentEventRow.fecha_fin;
+    const targetDateIso = payload.targetDate ? toIsoDate(payload.targetDate) : getColombiaTodayIsoDate();
+    const effectiveStartIso = maxIsoDate(eventStartIso, targetDateIso);
+
+    if (effectiveStartIso <= eventEndIso) {
+      const conflict = await tx.$queryRaw<
+        Array<{
+          subject: string;
+          room: string;
+          start_time: string;
+          end_time: string;
+          day_label: string;
+        }>
+      >`
+        SELECT
+          e.nombre_principal AS subject,
+          COALESCE(sx.nombre_bloque, sb.nombre_bloque) AS room,
+          TO_CHAR(COALESCE(x.hora_inicio, h.hora_inicio), 'HH24:MI:SS') AS start_time,
+          TO_CHAR(COALESCE(x.hora_fin, h.hora_fin), 'HH24:MI:SS') AS end_time,
+          COALESCE(x.dia_semana, h.dia_semana)::text AS day_label
+        FROM public.horarios_evento h
+        INNER JOIN public.eventos e ON e.id = h.evento_id
+        INNER JOIN public.salones sb ON sb.id = h.salon_id
+        LEFT JOIN public.solicitudes_salon sr ON sr.evento_id = e.id
+        LEFT JOIN public.horarios_evento_excepciones x
+          ON x.horario_id = h.id
+         AND x.fecha = ${effectiveStartIso}::date
+        LEFT JOIN public.salones sx ON sx.id = x.salon_id
+        WHERE COALESCE(x.salon_id, h.salon_id) = ${salonId}::uuid
+          AND COALESCE(x.dia_semana, h.dia_semana) = ${canonicalDay}::public.dia_semana_enum
+          AND (${payload.startTime}::time < COALESCE(x.hora_fin, h.hora_fin)
+            AND COALESCE(x.hora_inicio, h.hora_inicio) < ${payload.endTime}::time)
+          AND COALESCE(sr.estado, 'aprobada') <> 'rechazada'
+          AND (${effectiveStartIso}::date <= e.fecha_fin AND ${eventEndIso}::date >= e.fecha_inicio)
+          AND NOT (h.id = ${payload.slotId}::uuid AND h.evento_id = ${payload.eventId}::uuid)
+        LIMIT 1
+      `;
+
+      if (conflict[0]) {
+        const dayLabelRaw = conflict[0].day_label;
+        const dayLabel = dayLabelRaw === "Miercoles" ? "Miércoles" : dayLabelRaw === "Sabado" ? "Sábado" : dayLabelRaw;
+        throw new Error(
+          `CONFLICTO_SOLAPE|${conflict[0].room}|${dayLabel}|${conflict[0].start_time}-${conflict[0].end_time}|${payload.startTime}:00-${payload.endTime}:00|${conflict[0].subject}`
+        );
+      }
+    }
+
+    await ensureSlotExceptionsTableReady();
+
+    const preservePastUntilIso = previousIsoDate(effectiveStartIso);
+    if (eventStartIso <= preservePastUntilIso) {
+      await tx.$executeRawUnsafe(
+        `
+          INSERT INTO public.horarios_evento_excepciones (
+            horario_id,
+            fecha,
+            dia_semana,
+            salon_id,
+            hora_inicio,
+            hora_fin,
+            created_at,
+            updated_at
+          )
+          SELECT
+            $1::uuid,
+            gs::date,
+            $2::public.dia_semana_enum,
+            $3::uuid,
+            $4::time,
+            $5::time,
+            now(),
+            now()
+          FROM generate_series($6::date, $7::date, interval '1 day') AS gs
+          WHERE EXTRACT(ISODOW FROM gs::date) =
+            CASE $2
+              WHEN 'Lunes' THEN 1
+              WHEN 'Martes' THEN 2
+              WHEN 'Miercoles' THEN 3
+              WHEN 'Jueves' THEN 4
+              WHEN 'Viernes' THEN 5
+              WHEN 'Sabado' THEN 6
+              WHEN 'Domingo' THEN 7
+              ELSE 0
+            END
+          ON CONFLICT (horario_id, fecha)
+          DO NOTHING
+        `,
+        payload.slotId,
+        currentSlot.dia_semana,
+        currentSlot.salon_id,
+        currentSlot.hora_inicio,
+        currentSlot.hora_fin,
+        eventStartIso,
+        preservePastUntilIso,
+      );
+    }
 
     const updatedEvent = await tx.$queryRaw<Array<{ id: string }>>`
       UPDATE public.eventos
@@ -1477,6 +1652,7 @@ export const getScheduleEvents = async () => {
     evento_id: string;
     horario_id: string;
     request_id: string | null;
+    requested_by_staff_id: string | null;
     day: string;
     room: string;
     start: string;
@@ -1497,6 +1673,7 @@ export const getScheduleEvents = async () => {
         evento_id: string;
         horario_id: string;
         request_id: string | null;
+        requested_by_staff_id: string | null;
         day: string;
         room: string;
         start: string;
@@ -1526,6 +1703,7 @@ export const getScheduleEvents = async () => {
         TO_CHAR(e.fecha_fin, 'YYYY-MM-DD') AS end_date,
         e.tipo_reserva_id,
         sr.id::text AS request_id,
+        sr.solicitado_por_staff_id::text AS requested_by_staff_id,
         sr.estado AS request_status
       FROM public.eventos e
       INNER JOIN public.horarios_evento h ON h.evento_id = e.id
@@ -1542,6 +1720,7 @@ export const getScheduleEvents = async () => {
         evento_id: string;
         horario_id: string;
         request_id: string | null;
+        requested_by_staff_id: string | null;
         day: string;
         room: string;
         start: string;
@@ -1571,6 +1750,7 @@ export const getScheduleEvents = async () => {
         TO_CHAR(e.fecha_fin, 'YYYY-MM-DD') AS end_date,
         e.tipo_reserva_id,
         NULL::text AS request_id,
+        NULL::text AS requested_by_staff_id,
         NULL::text AS request_status
       FROM public.eventos e
       INNER JOIN public.horarios_evento h ON h.evento_id = e.id
@@ -1632,6 +1812,7 @@ export const getScheduleEvents = async () => {
     id: `${item.evento_id}:${item.horario_id}`,
     classId: item.evento_id,
     requestId: item.request_id ?? undefined,
+    requestedByStaffId: item.requested_by_staff_id ?? undefined,
     day: item.day,
     room: canonicalRoomName(item.room) ?? item.room,
     start: item.start,
@@ -1657,6 +1838,7 @@ export const getPendingScheduleRequests = async () => {
       request_id: string;
       event_id: string;
       status: ScheduleRequestStatus;
+      requested_by_staff_id: string | null;
       requested_by_name: string;
       requested_by_role: string;
       faculty: string;
@@ -1676,6 +1858,7 @@ export const getPendingScheduleRequests = async () => {
       sr.id::text AS request_id,
       e.id::text AS event_id,
       sr.estado AS status,
+      sr.solicitado_por_staff_id::text AS requested_by_staff_id,
       sr.solicitado_por_nombre AS requested_by_name,
       sr.solicitado_por_rol AS requested_by_role,
       COALESCE(f.nombre, 'Reserva') AS faculty,
@@ -1702,6 +1885,7 @@ export const getPendingScheduleRequests = async () => {
     id: request.request_id,
     eventId: request.event_id,
     status: request.status,
+    requestedByStaffId: request.requested_by_staff_id ?? undefined,
     requestedByName: request.requested_by_name,
     requestedByRole: request.requested_by_role,
     faculty: request.faculty,
@@ -1745,6 +1929,212 @@ export const updateScheduleRequestStatus = async (
   return { requestId: updated[0].id };
 };
 
+export const updatePendingScheduleRequest = async (
+  requestId: string,
+  payload: CreateScheduleEventInput,
+  actor: { staffId: string; role: "admin" | "monitor"; name: string },
+) => {
+  await ensureScheduleRequestsTableReady();
+
+  const requestRows = await prisma.$queryRaw<Array<{
+    request_id: string;
+    event_id: string;
+    requested_by_staff_id: string | null;
+    requested_by_name: string;
+    requested_by_role: string;
+    status: ScheduleRequestStatus;
+    slot_id: string;
+    slots_count: number;
+  }>>`
+    SELECT
+      sr.id::text AS request_id,
+      e.id::text AS event_id,
+      sr.solicitado_por_staff_id::text AS requested_by_staff_id,
+      sr.solicitado_por_nombre AS requested_by_name,
+      sr.solicitado_por_rol AS requested_by_role,
+      sr.estado AS status,
+      h.id::text AS slot_id,
+      COUNT(*) OVER (PARTITION BY e.id)::int AS slots_count
+    FROM public.solicitudes_salon sr
+    INNER JOIN public.eventos e ON e.id = sr.evento_id
+    INNER JOIN public.horarios_evento h ON h.evento_id = e.id
+    WHERE sr.id = ${requestId}::uuid
+    LIMIT 1
+  `;
+
+  const requestRow = requestRows[0];
+  if (!requestRow?.request_id) {
+    throw new Error("No se encontro la solicitud pendiente");
+  }
+
+  if (requestRow.status !== "pendiente") {
+    throw new Error("Solo puedes editar solicitudes pendientes");
+  }
+
+  if (actor.role === "monitor") {
+    const strictMatch = requestRow.requested_by_staff_id === actor.staffId;
+    const legacyNameMatch =
+      !requestRow.requested_by_staff_id &&
+      normalizePersonName(requestRow.requested_by_name) === normalizePersonName(actor.name) &&
+      (requestRow.requested_by_role ?? "").toLowerCase() === "monitor";
+
+    if (!strictMatch && !legacyNameMatch) {
+      throw new Error("Solo puedes editar tus propias solicitudes pendientes");
+    }
+
+    if (legacyNameMatch) {
+      await prisma.$executeRaw`
+        UPDATE public.solicitudes_salon
+        SET solicitado_por_staff_id = ${actor.staffId}::uuid,
+            updated_at = now()
+        WHERE id = ${requestId}::uuid
+          AND solicitado_por_staff_id IS NULL
+      `;
+    }
+  }
+
+  if (requestRow.slots_count !== 1) {
+    throw new Error("La solicitud debe tener un unico horario para poder editarse");
+  }
+
+  await updateScheduleEventSlot({
+    eventId: requestRow.event_id,
+    slotId: requestRow.slot_id,
+    faculty: payload.faculty,
+    code: payload.code,
+    subject: payload.subject,
+    teacher: payload.teacher,
+    startDate: payload.startDate,
+    endDate: payload.endDate,
+    day: payload.slots[0]?.day ?? "",
+    room: payload.slots[0]?.room ?? "",
+    startTime: payload.slots[0]?.startTime ?? "",
+    endTime: payload.slots[0]?.endTime ?? "",
+  });
+
+  await prisma.$executeRaw`
+    UPDATE public.solicitudes_salon
+    SET updated_at = now()
+    WHERE id = ${requestId}::uuid
+      AND estado = 'pendiente'
+  `;
+
+  return { requestId, eventId: requestRow.event_id };
+};
+
+export const deletePendingScheduleRequest = async (
+  requestId: string,
+  actor: { staffId: string; role: "admin" | "monitor"; name: string },
+) => {
+  await ensureScheduleRequestsTableReady();
+
+  const requestRows = await prisma.$queryRaw<Array<{
+    request_id: string;
+    event_id: string;
+    requested_by_staff_id: string | null;
+    requested_by_name: string;
+    requested_by_role: string;
+    status: ScheduleRequestStatus;
+  }>>`
+    SELECT
+      sr.id::text AS request_id,
+      e.id::text AS event_id,
+      sr.solicitado_por_staff_id::text AS requested_by_staff_id,
+      sr.solicitado_por_nombre AS requested_by_name,
+      sr.solicitado_por_rol AS requested_by_role,
+      sr.estado AS status
+    FROM public.solicitudes_salon sr
+    INNER JOIN public.eventos e ON e.id = sr.evento_id
+    WHERE sr.id = ${requestId}::uuid
+    LIMIT 1
+  `;
+
+  const requestRow = requestRows[0];
+  if (!requestRow?.request_id) {
+    throw new Error("No se encontro la solicitud pendiente");
+  }
+
+  if (requestRow.status !== "pendiente") {
+    throw new Error("Solo puedes eliminar solicitudes pendientes");
+  }
+
+  if (actor.role === "monitor") {
+    const strictMatch = requestRow.requested_by_staff_id === actor.staffId;
+    const legacyNameMatch =
+      !requestRow.requested_by_staff_id &&
+      normalizePersonName(requestRow.requested_by_name) === normalizePersonName(actor.name) &&
+      (requestRow.requested_by_role ?? "").toLowerCase() === "monitor";
+
+    if (!strictMatch && !legacyNameMatch) {
+      throw new Error("Solo puedes eliminar tus propias solicitudes pendientes");
+    }
+
+    if (legacyNameMatch) {
+      await prisma.$executeRaw`
+        UPDATE public.solicitudes_salon
+        SET solicitado_por_staff_id = ${actor.staffId}::uuid,
+            updated_at = now()
+        WHERE id = ${requestId}::uuid
+          AND solicitado_por_staff_id IS NULL
+      `;
+    }
+  }
+
+  await prisma.$transaction(async (tx) => {
+    await tx.$executeRaw`
+      DELETE FROM public.eventos
+      WHERE id = ${requestRow.event_id}::uuid
+    `;
+  });
+
+  return { requestId, eventId: requestRow.event_id };
+};
+
+export const updatePendingScheduleRequestByEventId = async (
+  eventId: string,
+  payload: CreateScheduleEventInput,
+  actor: { staffId: string; role: "admin" | "monitor"; name: string },
+) => {
+  await ensureScheduleRequestsTableReady();
+
+  const rows = await prisma.$queryRaw<Array<{ request_id: string }>>`
+    SELECT sr.id::text AS request_id
+    FROM public.solicitudes_salon sr
+    WHERE sr.evento_id = ${eventId}::uuid
+    ORDER BY CASE WHEN sr.estado = 'pendiente' THEN 0 ELSE 1 END, sr.updated_at DESC
+    LIMIT 1
+  `;
+
+  const requestId = rows[0]?.request_id;
+  if (!requestId) {
+    throw new Error("No se encontro la solicitud pendiente");
+  }
+
+  return updatePendingScheduleRequest(requestId, payload, actor);
+};
+
+export const deletePendingScheduleRequestByEventId = async (
+  eventId: string,
+  actor: { staffId: string; role: "admin" | "monitor"; name: string },
+) => {
+  await ensureScheduleRequestsTableReady();
+
+  const rows = await prisma.$queryRaw<Array<{ request_id: string }>>`
+    SELECT sr.id::text AS request_id
+    FROM public.solicitudes_salon sr
+    WHERE sr.evento_id = ${eventId}::uuid
+    ORDER BY CASE WHEN sr.estado = 'pendiente' THEN 0 ELSE 1 END, sr.updated_at DESC
+    LIMIT 1
+  `;
+
+  const requestId = rows[0]?.request_id;
+  if (!requestId) {
+    throw new Error("No se encontro la solicitud pendiente");
+  }
+
+  return deletePendingScheduleRequest(requestId, actor);
+};
+
 export const getRooms = async () => {
   const rooms = await prisma.$queryRaw<Array<{ room: string }>>`
     SELECT nombre_bloque AS room
@@ -1755,6 +2145,103 @@ export const getRooms = async () => {
 
   // Return only the official room catalog in the exact order requested by business rules.
   return roomDisplayOrder.filter((room) => roomKeysInDb.has(roomKey(room)));
+};
+
+export const getSharedScheduleState = async (): Promise<SharedScheduleState> => {
+  await ensureSharedScheduleStateReady();
+
+  const [disabledRooms, visualAssignments] = await Promise.all([
+    prisma.$queryRaw<Array<{ room_name: string }>>`
+      SELECT room_name
+      FROM public.schedule_disabled_rooms
+      WHERE disabled = true
+      ORDER BY room_name ASC
+    `,
+    prisma.$queryRaw<Array<{ event_id: string; target_date: string; room_name: string }>>`
+      SELECT
+        event_id::text AS event_id,
+        TO_CHAR(target_date, 'YYYY-MM-DD') AS target_date,
+        room_name
+      FROM public.schedule_visual_room_assignments
+      ORDER BY target_date DESC, event_id ASC
+    `,
+  ]);
+
+  return {
+    disabledRooms: disabledRooms.map((item) => item.room_name),
+    visualAssignments: visualAssignments.map((item) => ({
+      eventId: item.event_id,
+      targetDate: item.target_date,
+      roomName: canonicalRoomName(item.room_name) ?? item.room_name,
+    })),
+  };
+};
+
+export const setSharedRoomDisabledState = async (roomName: string, disabled: boolean) => {
+  await ensureSharedScheduleStateReady();
+
+  const canonical = canonicalRoomName(roomName)?.trim() || roomName.trim();
+  if (!canonical) {
+    throw new Error("El salon no puede estar vacio");
+  }
+
+  if (disabled) {
+    await prisma.$executeRaw`
+      INSERT INTO public.schedule_disabled_rooms (room_name, disabled, updated_at)
+      VALUES (${canonical}, true, now())
+      ON CONFLICT (room_name) DO UPDATE
+      SET disabled = EXCLUDED.disabled,
+          updated_at = now()
+    `;
+  } else {
+    await prisma.$executeRaw`
+      DELETE FROM public.schedule_disabled_rooms
+      WHERE room_name = ${canonical}
+    `;
+  }
+
+  return getSharedScheduleState();
+};
+
+export const upsertSharedVisualRoomAssignment = async (eventId: string, targetDate: string, roomName: string) => {
+  await ensureSharedScheduleStateReady();
+
+  const canonical = canonicalRoomName(roomName)?.trim() || roomName.trim();
+  if (!canonical) {
+    throw new Error("El salon no puede estar vacio");
+  }
+
+  const normalizedTargetDate = targetDate.trim();
+  if (!/^\d{4}-\d{2}-\d{2}$/.test(normalizedTargetDate)) {
+    throw new Error("La fecha objetivo es invalida");
+  }
+
+  await prisma.$executeRaw`
+    INSERT INTO public.schedule_visual_room_assignments (event_id, target_date, room_name, updated_at)
+    VALUES (${eventId}::uuid, ${normalizedTargetDate}::date, ${canonical}, now())
+    ON CONFLICT (event_id, target_date) DO UPDATE
+    SET room_name = EXCLUDED.room_name,
+        updated_at = now()
+  `;
+
+  return getSharedScheduleState();
+};
+
+export const deleteSharedVisualRoomAssignment = async (eventId: string, targetDate: string) => {
+  await ensureSharedScheduleStateReady();
+
+  const normalizedTargetDate = targetDate.trim();
+  if (!/^\d{4}-\d{2}-\d{2}$/.test(normalizedTargetDate)) {
+    throw new Error("La fecha objetivo es invalida");
+  }
+
+  await prisma.$executeRaw`
+    DELETE FROM public.schedule_visual_room_assignments
+    WHERE event_id = ${eventId}::uuid
+      AND target_date = ${normalizedTargetDate}::date
+  `;
+
+  return getSharedScheduleState();
 };
 
 export const findAvailableRooms = async (payload: SearchAvailableRoomsInput) => {
