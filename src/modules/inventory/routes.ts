@@ -24,6 +24,15 @@ inventoryRouter.use(async (_req, _res, next) => {
   }
 });
 
+inventoryRouter.get("/rooms-equipment", async (_req, res, next) => {
+  try {
+    const items = await listInventoryItems();
+    return res.json({ items });
+  } catch (error) {
+    return next(error);
+  }
+});
+
 const groupBodySchema = z.object({
   name: z.string().trim().min(2).max(120),
   icon: z.string().trim().min(1).max(80).optional(),
