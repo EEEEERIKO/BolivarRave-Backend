@@ -87,3 +87,36 @@ model HorarioEvento {
   @@index([horaInicio, horaFin])
   @@map("horarios_evento")
 }
+
+model InventoryGroup {
+  id        String          @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
+  name      String          @unique @map("nombre") @db.VarChar(120)
+  icon      String          @map("icono") @db.VarChar(80)
+  order     Int             @default(0) @map("orden")
+  createdAt DateTime        @default(now()) @map("created_at") @db.Timestamptz(6)
+  updatedAt DateTime        @updatedAt @map("updated_at") @db.Timestamptz(6)
+  items     InventoryItem[]
+
+  @@index([order])
+  @@map("inventory_groups")
+}
+
+model InventoryItem {
+  id        String         @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
+  groupId   String         @map("group_id") @db.Uuid
+  name      String         @db.VarChar(160)
+  code      String         @map("codigo") @db.VarChar(80)
+  room      String         @map("salon") @db.VarChar(160)
+  status    String         @db.VarChar(20)
+  defective Boolean         @default(false) @map("defectuoso")
+  order     Int             @default(0) @map("orden")
+  createdAt DateTime       @default(now()) @map("created_at") @db.Timestamptz(6)
+  updatedAt DateTime       @updatedAt @map("updated_at") @db.Timestamptz(6)
+  group     InventoryGroup @relation(fields: [groupId], references: [id], onDelete: Cascade)
+
+  @@unique([groupId, code])
+  @@index([groupId])
+  @@index([status])
+  @@index([defective])
+  @@map("inventory_items")
+}
