@@ -46,6 +46,7 @@ const itemBodySchema = z.object({
   room: z.string().trim().min(2).max(160),
   status: z.enum(["Disponible", "Fijo"]),
   defective: z.boolean().default(false),
+  motivo: z.string().trim().max(500).nullable().optional(),
   order: z.number().int().min(0).optional(),
 });
 
@@ -180,6 +181,7 @@ inventoryRouter.post("/items", requireAdminRole, async (req, res, next) => {
       room: parsed.room,
       status: parsed.status,
       defective: parsed.defective,
+      motivo: parsed.motivo ?? null,
       ...(parsed.order !== undefined ? { order: parsed.order } : {}),
     });
 
@@ -208,6 +210,7 @@ inventoryRouter.put("/items/:id", requireAdminRole, async (req, res, next) => {
       room: parsed.room,
       status: parsed.status,
       defective: parsed.defective,
+      motivo: parsed.motivo ?? null,
       ...(parsed.order !== undefined ? { order: parsed.order } : {}),
     });
 

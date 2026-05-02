@@ -63,12 +63,18 @@ const ensureInventorySchema = async () => {
       salon text NOT NULL,
       estado text NOT NULL DEFAULT 'Disponible',
       defectuoso boolean NOT NULL DEFAULT false,
+      motivo text,
       orden integer NOT NULL DEFAULT 0,
       created_at timestamptz NOT NULL DEFAULT now(),
       updated_at timestamptz NOT NULL DEFAULT now(),
       CONSTRAINT inventory_items_estado_chk CHECK (estado IN ('Disponible', 'Fijo')),
       CONSTRAINT inventory_items_group_code_unique UNIQUE (group_id, codigo)
     )
+  `;
+
+  await prisma.$executeRaw`
+    ALTER TABLE public.inventory_items
+    ADD COLUMN IF NOT EXISTS motivo text
   `;
 
   await prisma.$executeRaw`
@@ -195,6 +201,7 @@ export type InventoryItemRow = {
   room: string;
   status: InventoryItemStatus;
   defective: boolean;
+  motivo: string | null;
   order: number;
   createdAt: string;
   updatedAt: string;
@@ -237,6 +244,7 @@ export const listInventoryItems = async (groupId?: string) => {
         i.salon AS room,
         i.estado AS status,
         i.defectuoso AS defective,
+        i.motivo AS motivo,
         i.orden AS "order",
         TO_CHAR(i.created_at, 'YYYY-MM-DD"T"HH24:MI:SS.MS"Z"') AS "createdAt",
         TO_CHAR(i.updated_at, 'YYYY-MM-DD"T"HH24:MI:SS.MS"Z"') AS "updatedAt"
@@ -260,6 +268,7 @@ export const listInventoryItems = async (groupId?: string) => {
       i.salon AS room,
       i.estado AS status,
       i.defectuoso AS defective,
+      i.motivo AS motivo,
       i.orden AS "order",
       TO_CHAR(i.created_at, 'YYYY-MM-DD"T"HH24:MI:SS.MS"Z"') AS "createdAt",
       TO_CHAR(i.updated_at, 'YYYY-MM-DD"T"HH24:MI:SS.MS"Z"') AS "updatedAt"
@@ -362,14 +371,15 @@ export const createInventoryItem = async (payload: {
   room: string;
   status: InventoryItemStatus;
   defective: boolean;
+  motivo?: string | null;
   order?: number;
 }) => {
   await ensureInventorySchemaReady();
   await assertGroupExists(payload.groupId);
 
   const rows = await prisma.$queryRaw<Array<{ id: string }>>`
-    INSERT INTO public.inventory_items (group_id, nombre, codigo, salon, estado, defectuoso, orden)
-    VALUES (${payload.groupId}::uuid, ${payload.name}, ${payload.code}, ${payload.room}, ${payload.status}, ${payload.defective}, ${payload.order ?? (await getNextItemOrder(payload.groupId))})
+    INSERT INTO public.inventory_items (group_id, nombre, codigo, salon, estado, defectuoso, motivo, orden)
+    VALUES (${payload.groupId}::uuid, ${payload.name}, ${payload.code}, ${payload.room}, ${payload.status}, ${payload.defective}, ${payload.motivo ?? null}, ${payload.order ?? (await getNextItemOrder(payload.groupId))})
     RETURNING id::text AS id
   `;
 
@@ -388,6 +398,7 @@ export const updateInventoryItem = async (itemId: string, payload: {
   room: string;
   status: InventoryItemStatus;
   defective: boolean;
+  motivo?: string | null;
   order?: number;
 }) => {
   await ensureInventorySchemaReady();
@@ -402,6 +413,7 @@ export const updateInventoryItem = async (itemId: string, payload: {
       salon = ${payload.room},
       estado = ${payload.status},
       defectuoso = ${payload.defective},
+      motivo = ${payload.motivo ?? null},
       orden = COALESCE(${payload.order ?? null}, orden),
       updated_at = now()
     WHERE id = ${itemId}::uuid
