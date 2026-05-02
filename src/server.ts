@@ -5,6 +5,7 @@ import { createServer } from "http";
 import rateLimit from "express-rate-limit";
 import { schedulesRouter } from "./modules/schedules/routes";
 import { auditorioRouter } from "./modules/auditorio/routes";
+import { inventoryRouter } from "./modules/inventory/routes";
 import { staffRouter } from "./modules/staff/routes";
 import { tasksRouter } from "./modules/tasks/routes";
 import { initializeWebSocket, getWebSocketServer } from "./lib/websocket";
@@ -119,6 +120,7 @@ app.use("/api", (req, res, next) => {
 
 app.use("/api/schedules", schedulesRouter);
 app.use("/api/auditorio", auditorioRouter);
+app.use("/api/inventory", inventoryRouter);
 app.use("/api/staff", staffRouter);
 app.use("/api/tasks", requireAdminOrMonitorRole, tasksRouter);
 
