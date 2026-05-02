@@ -246,7 +246,7 @@ const ensureOverlapValidationFunction = async () => {
       where coalesce(x.salon_id, h.salon_id) = p_salon_id
         and coalesce(x.dia_semana, h.dia_semana) = p_dia
         and (p_hora_inicio < coalesce(x.hora_fin, h.hora_fin) and coalesce(x.hora_inicio, h.hora_inicio) < p_hora_fin)
-        and coalesce(sr.estado, 'aprobada') <> 'rechazada'
+        and (sr.id is null or sr.estado <> 'rechazada')
         and (v_target_date is null or
             (v_target_date >= v_nuevo_inicio and v_target_date <= v_nuevo_fin and
              v_target_date >= e.fecha_inicio and v_target_date <= e.fecha_fin))
@@ -1071,7 +1071,7 @@ export const createScheduleEvent = async (payload: CreateScheduleEventInput) => 
           AND COALESCE(x.dia_semana, h.dia_semana) = ${slot.day}::public.dia_semana_enum
           AND (${slot.startTime}::time < COALESCE(x.hora_fin, h.hora_fin)
             AND COALESCE(x.hora_inicio, h.hora_inicio) < ${slot.endTime}::time)
-          AND COALESCE(sr.estado, 'aprobada') <> 'rechazada'
+          AND (sr.id IS NULL OR sr.estado <> 'rechazada')
           AND (
             ${targetDateIso}::date IS NULL OR
             (
@@ -1303,7 +1303,7 @@ export const updateScheduleEventSlot = async (payload: UpdateScheduleEventSlotIn
           AND COALESCE(x.salon_id, h.salon_id) = ${salonId}::uuid
           AND (${payload.startTime}::time < COALESCE(x.hora_fin, h.hora_fin)
             AND COALESCE(x.hora_inicio, h.hora_inicio) < ${payload.endTime}::time)
-          AND COALESCE(sr.estado, 'aprobada') <> 'rechazada'
+          AND (sr.id IS NULL OR sr.estado <> 'rechazada')
           AND NOT (h.id = ${payload.slotId}::uuid AND h.evento_id = ${payload.eventId}::uuid)
         LIMIT 1
       `;
@@ -1431,7 +1431,7 @@ export const updateScheduleEventSlot = async (payload: UpdateScheduleEventSlotIn
           AND COALESCE(x.dia_semana, h.dia_semana) = ${canonicalDay}::public.dia_semana_enum
           AND (${payload.startTime}::time < COALESCE(x.hora_fin, h.hora_fin)
             AND COALESCE(x.hora_inicio, h.hora_inicio) < ${payload.endTime}::time)
-          AND COALESCE(sr.estado, 'aprobada') <> 'rechazada'
+          AND (sr.id IS NULL OR sr.estado <> 'rechazada')
           AND (${effectiveStartIso}::date <= e.fecha_fin AND ${eventEndIso}::date >= e.fecha_inicio)
           AND NOT (h.id = ${payload.slotId}::uuid AND h.evento_id = ${payload.eventId}::uuid)
         LIMIT 1
@@ -1636,6 +1636,8 @@ export const clearAllSchedules = async (requestedBy = "schedules-ui") => {
 export const getScheduleEvents = async () => {
   // En entornos con permisos restringidos, la creación/consulta de tablas auxiliares
   // puede fallar. Este endpoint debe seguir devolviendo eventos base.
+  // NOTA IMPORTANTE: Esta función devuelve TODOS los tipos de reserva (normal, momentanea, iglesia)
+  // sin filtrado por tipo. El contador del dashboard "Salones en clase ahora" debe incluirlos todos.
   try {
     await ensureSlotExceptionsTableReady();
   } catch (error) {
@@ -1710,9 +1712,15 @@ export const getScheduleEvents = async () => {
       INNER JOIN public.salones s ON s.id = h.salon_id
       LEFT JOIN public.facultades f ON f.id = e.facultad_id
       LEFT JOIN public.solicitudes_salon sr ON sr.evento_id = e.id
-      WHERE COALESCE(sr.estado, 'aprobada') <> 'rechazada'
+      WHERE sr.id IS NULL OR sr.estado <> 'rechazada'
       ORDER BY e.nombre_principal ASC
     `;
+    // Diagnostic log to verify all reservation types are included
+    const typoCounts = new Map<number, number>();
+    events.forEach((e) => {
+      typoCounts.set(e.tipo_reserva_id, (typoCounts.get(e.tipo_reserva_id) ?? 0) + 1);
+    });
+    console.log("[schedules/events] Returned events by tipo_reserva_id:", Object.fromEntries(typoCounts), "Total:", events.length);
   } catch (error) {
     console.warn("[schedules] Fallback sin solicitudes_salon:", error);
     events = await prisma.$queryRaw<
@@ -1808,7 +1816,7 @@ export const getScheduleEvents = async () => {
     overridesBySlot.set(item.horario_id, bucket);
   });
 
-  return events.map((item) => ({
+  const result = events.map((item) => ({
     id: `${item.evento_id}:${item.horario_id}`,
     classId: item.evento_id,
     requestId: item.request_id ?? undefined,
@@ -1828,6 +1836,16 @@ export const getScheduleEvents = async () => {
     color: item.tipo_reserva_id === 3 ? "red" : item.tipo_reserva_id === 2 ? "amber" : "blue",
     requestStatus: item.request_status ?? "aprobada",
   }));
+
+  // Final diagnostic: log what's being returned
+  const finalTypeCounts = new Map<string, number>();
+  result.forEach((e) => {
+    const type = e.reservationType;
+    finalTypeCounts.set(type, (finalTypeCounts.get(type) ?? 0) + 1);
+  });
+  console.log("[schedules/events] Final response by reservationType:", Object.fromEntries(finalTypeCounts), "Total:", result.length);
+  
+  return result;
 };
 
 export const getPendingScheduleRequests = async () => {

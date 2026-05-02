@@ -109,6 +109,7 @@ model InventoryItem {
   room      String         @map("salon") @db.VarChar(160)
   status    String         @db.VarChar(20)
   defective Boolean         @default(false) @map("defectuoso")
+  motivo    String?        @map("motivo") @db.Text
   order     Int             @default(0) @map("orden")
   createdAt DateTime       @default(now()) @map("created_at") @db.Timestamptz(6)
   updatedAt DateTime       @updatedAt @map("updated_at") @db.Timestamptz(6)
