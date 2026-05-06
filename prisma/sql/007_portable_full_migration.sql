@@ -183,10 +183,9 @@ begin
     raise exception 'Evento no encontrado para validar solape: %', p_evento_id;
   end if;
 
-  v_target_date := p_target_date;
-  if v_target_date is null and v_nuevo_inicio = v_nuevo_fin then
-    v_target_date := v_nuevo_inicio;
-  end if;
+  -- Use the provided p_target_date when available. Do NOT clamp to today;
+  -- the change should apply starting from the selected date forward.
+  v_target_date := coalesce(p_target_date, (timezone('America/Bogota', now()))::date);
 
   select 
     h.id, 
@@ -207,11 +206,8 @@ begin
   where coalesce(x.salon_id, h.salon_id) = p_salon_id
     and coalesce(x.dia_semana, h.dia_semana) = p_dia
     and (p_hora_inicio < coalesce(x.hora_fin, h.hora_fin) and coalesce(x.hora_inicio, h.hora_inicio) < p_hora_fin)
-    and (v_target_date is null or 
-         (v_target_date >= v_nuevo_inicio and v_target_date <= v_nuevo_fin and
-          v_target_date >= e.fecha_inicio and v_target_date <= e.fecha_fin))
-    and (v_target_date is not null or
-         daterange(v_nuevo_inicio, v_nuevo_fin, '[]') && daterange(e.fecha_inicio, e.fecha_fin, '[]'))
+        and (v_target_date >= v_nuevo_inicio and v_target_date <= v_nuevo_fin and
+          v_target_date >= e.fecha_inicio and v_target_date <= e.fecha_fin)
     and (p_horario_id is null or h.id <> p_horario_id)
     and h.evento_id <> p_evento_id
   limit 1;

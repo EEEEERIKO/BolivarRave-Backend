@@ -236,7 +236,7 @@ const handleKnownScheduleWriteError = (error: unknown, res: import("express").Re
   const message = error.message;
   const messageLower = message.toLowerCase();
 
-  // Parse detailed conflict error: CONFLICTO_SOLAPE|salon|dia|hora_conflicto|hora_intento|clase
+  // Parse detailed conflict error: CONFLICTO_SOLAPE|salon|dia|hora_conflicto|hora_intento|clase|inicio_existente|fin_existente|fecha_objetivo
   if (message.includes("CONFLICTO_SOLAPE")) {
     const parts = message.split("|");
     if (parts.length >= 6) {
@@ -245,17 +245,23 @@ const handleKnownScheduleWriteError = (error: unknown, res: import("express").Re
       const horaConflicto = parts[3]; // hora de la clase que ya existe
       const horaIntento = parts[4]; // hora que intentaste poner
       const clase = parts[5];
-      const rangoExistente = parts[6];
+      const inicioExistente = parts[6] ?? null;
+      const finExistente = parts[7] ?? null;
+      const fechaObjetivo = parts[8] ?? null;
+      const rangoExistente = inicioExistente && finExistente ? `${inicioExistente} a ${finExistente}` : null;
 
       res.status(409).json({
-        error: `Solapamiento detectado en ${salon} el ${dia}. La clase "${clase}" ocupa ${horaConflicto}, pero intentaste usar ${horaIntento}${rangoExistente ? ` (rango: ${rangoExistente})` : ""}.`,
+        error: `Solapamiento detectado en ${salon} el ${dia}. La clase "${clase}" ocupa ${horaConflicto}, pero intentaste usar ${horaIntento}${rangoExistente ? ` (rango: ${rangoExistente})` : ""}${fechaObjetivo ? ` [fecha objetivo: ${fechaObjetivo}]` : ""}.`,
         details: {
           salon,
           dia,
           horaConflictiva: horaConflicto,
           horaIntentada: horaIntento,
           claseConflictiva: clase,
-          rangoExistente: rangoExistente ?? null,
+          rangoExistente,
+          inicioExistente,
+          finExistente,
+          fechaObjetivo,
         },
       });
       return true;

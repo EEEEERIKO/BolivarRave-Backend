@@ -1090,7 +1090,7 @@ export const createScheduleEvent = async (payload: CreateScheduleEventInput) => 
 
       if (conflict[0]) {
         throw new Error(
-          `CONFLICTO_SOLAPE|${conflict[0].room}|${slot.day}|${conflict[0].start_time}-${conflict[0].end_time}|${slot.startTime}-${slot.endTime}|${conflict[0].subject}|${conflict[0].existing_start_date} a ${conflict[0].existing_end_date}`
+          `CONFLICTO_SOLAPE|${conflict[0].room}|${slot.day}|${conflict[0].start_time}-${conflict[0].end_time}|${slot.startTime}-${slot.endTime}|${conflict[0].subject}|${conflict[0].existing_start_date}|${conflict[0].existing_end_date}|${targetDateIso ?? "null"}`
         );
       }
     }
@@ -1270,7 +1270,10 @@ export const updateScheduleEventSlot = async (payload: UpdateScheduleEventSlotIn
       }
 
       const targetDateIso = toIsoDate(payload.targetDate);
-      const effectiveTargetDateIso = maxIsoDate(targetDateIso, getColombiaTodayIsoDate());
+      // Use the selected target date as the effective date floor —
+      // do NOT clamp to today. The change should apply starting
+      // from the selected date forward, preserving earlier dates.
+      const effectiveTargetDateIso = targetDateIso;
       const eventStart = currentEventRow.fecha_inicio;
       const eventEnd = currentEventRow.fecha_fin;
 
@@ -1402,7 +1405,8 @@ export const updateScheduleEventSlot = async (payload: UpdateScheduleEventSlotIn
     const eventStartIso = currentEventRow.fecha_inicio;
     const eventEndIso = currentEventRow.fecha_fin;
     const targetDateIso = payload.targetDate ? toIsoDate(payload.targetDate) : getColombiaTodayIsoDate();
-    const effectiveTargetDateIso = maxIsoDate(targetDateIso, getColombiaTodayIsoDate());
+    // Use the selected target date (when provided) as the effective floor.
+    const effectiveTargetDateIso = targetDateIso;
     const effectiveStartIso = maxIsoDate(eventStartIso, effectiveTargetDateIso);
 
     if (effectiveStartIso <= eventEndIso) {
@@ -1412,6 +1416,8 @@ export const updateScheduleEventSlot = async (payload: UpdateScheduleEventSlotIn
           room: string;
           start_time: string;
           end_time: string;
+          existing_start_date: string;
+          existing_end_date: string;
           day_label: string;
         }>
       >`
@@ -1420,6 +1426,8 @@ export const updateScheduleEventSlot = async (payload: UpdateScheduleEventSlotIn
           COALESCE(sx.nombre_bloque, sb.nombre_bloque) AS room,
           TO_CHAR(COALESCE(x.hora_inicio, h.hora_inicio), 'HH24:MI:SS') AS start_time,
           TO_CHAR(COALESCE(x.hora_fin, h.hora_fin), 'HH24:MI:SS') AS end_time,
+          TO_CHAR(e.fecha_inicio, 'YYYY-MM-DD') AS existing_start_date,
+          TO_CHAR(e.fecha_fin, 'YYYY-MM-DD') AS existing_end_date,
           COALESCE(x.dia_semana, h.dia_semana)::text AS day_label
         FROM public.horarios_evento h
         INNER JOIN public.eventos e ON e.id = h.evento_id
@@ -1443,7 +1451,7 @@ export const updateScheduleEventSlot = async (payload: UpdateScheduleEventSlotIn
         const dayLabelRaw = conflict[0].day_label;
         const dayLabel = dayLabelRaw === "Miercoles" ? "Miércoles" : dayLabelRaw === "Sabado" ? "Sábado" : dayLabelRaw;
         throw new Error(
-          `CONFLICTO_SOLAPE|${conflict[0].room}|${dayLabel}|${conflict[0].start_time}-${conflict[0].end_time}|${payload.startTime}:00-${payload.endTime}:00|${conflict[0].subject}`
+          `CONFLICTO_SOLAPE|${conflict[0].room}|${dayLabel}|${conflict[0].start_time}-${conflict[0].end_time}|${payload.startTime}:00-${payload.endTime}:00|${conflict[0].subject}|${conflict[0].existing_start_date}|${conflict[0].existing_end_date}|${effectiveStartIso}`
         );
       }
     }
@@ -1530,6 +1538,14 @@ export const updateScheduleEventSlot = async (payload: UpdateScheduleEventSlotIn
 
     if (!updatedSlot[0]?.id) {
       throw new Error("No se encontro el horario a modificar");
+    }
+
+    if (updateScope === "always") {
+      await tx.$executeRaw`
+        DELETE FROM public.horarios_evento_excepciones
+        WHERE horario_id = ${payload.slotId}::uuid
+          AND fecha >= ${effectiveStartIso}::date
+      `;
     }
   });
 };
