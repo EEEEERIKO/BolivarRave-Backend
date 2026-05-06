@@ -153,176 +153,28 @@ export class StaffAuthError extends Error {
   }
 }
 
-type SqlExecutor = Pick<typeof prisma, "$executeRaw">;
-
 let ensureStaffHorarioLaboralSchemaPromise: Promise<void> | null = null;
 let ensureStaffSecuritySchemaPromise: Promise<void> | null = null;
 const scryptAsync = promisify(scryptCallback);
 const CREDENTIAL_REQUIRED_ROLE_IDS = new Set([1, 2]);
 
-const ensureStaffHorarioLaboralSchema = async (executor: SqlExecutor) => {
-  await executor.$executeRaw`
-    DO $$
-    BEGIN
-      IF NOT EXISTS (
-        SELECT 1
-        FROM pg_type t
-        JOIN pg_namespace n ON n.oid = t.typnamespace
-        WHERE t.typname = 'staff_tipo_pausa_enum'
-          AND n.nspname = 'public'
-      ) THEN
-        CREATE TYPE public.staff_tipo_pausa_enum AS ENUM ('Comida', 'Descanso');
-      END IF;
-    END $$;
-  `;
-
-  await executor.$executeRaw`
-    CREATE TABLE IF NOT EXISTS public.staff_jornada_semanal (
-      id uuid PRIMARY KEY DEFAULT gen_random_uuid(),
-      staff_id uuid NOT NULL REFERENCES public.staff(id) ON DELETE CASCADE,
-      dia_semana public.dia_semana_enum NOT NULL,
-      hora_entrada time NOT NULL,
-      hora_salida time NOT NULL,
-      total_horas_dia numeric(5,2) NOT NULL,
-      CONSTRAINT staff_jornada_rango_hora_chk CHECK (hora_salida > hora_entrada),
-      CONSTRAINT staff_jornada_horas_positivas_chk CHECK (total_horas_dia >= 0)
-    )
-  `;
-
-  await executor.$executeRaw`
-    ALTER TABLE public.staff_pausas_programadas
-    DROP CONSTRAINT IF EXISTS staff_pausas_jornada_fk
-  `;
-
-  await executor.$executeRaw`
-    ALTER TABLE public.staff_jornada_semanal
-    DROP CONSTRAINT IF EXISTS staff_jornada_staff_dia_uq
-  `;
-
-  await executor.$executeRaw`
-    CREATE TABLE IF NOT EXISTS public.staff_pausas_programadas (
-      id uuid PRIMARY KEY DEFAULT gen_random_uuid(),
-      staff_id uuid NOT NULL,
-      tipo_pausa public.staff_tipo_pausa_enum NOT NULL,
-      dia_semana public.dia_semana_enum NOT NULL,
-      hora_inicio time NOT NULL,
-      hora_fin time NOT NULL,
-      CONSTRAINT staff_pausas_rango_hora_chk CHECK (hora_fin > hora_inicio),
-      CONSTRAINT staff_pausas_jornada_fk
-        FOREIGN KEY (staff_id, dia_semana)
-        REFERENCES public.staff_jornada_semanal(staff_id, dia_semana)
-        ON DELETE CASCADE
-    )
-  `;
-
-  await executor.$executeRaw`
-    CREATE TABLE IF NOT EXISTS public.staff_resumen_contrato (
-      staff_id uuid PRIMARY KEY REFERENCES public.staff(id) ON DELETE CASCADE,
-      horas_semanales_contrato integer NOT NULL,
-      balance_horas numeric(8,2) NOT NULL DEFAULT 0,
-      CONSTRAINT staff_resumen_horas_semanales_chk CHECK (horas_semanales_contrato > 0)
-    )
-  `;
-
-  await executor.$executeRaw`
-    CREATE TABLE IF NOT EXISTS public.staff_balance_movimientos (
-      id uuid PRIMARY KEY DEFAULT gen_random_uuid(),
-      staff_id uuid NOT NULL REFERENCES public.staff(id) ON DELETE CASCADE,
-      horas_delta numeric(8,2) NOT NULL,
-      motivo varchar(255),
-      creado_por_staff_id uuid REFERENCES public.staff(id) ON DELETE SET NULL,
-      created_at timestamptz NOT NULL DEFAULT now(),
-      CONSTRAINT staff_balance_movimientos_delta_chk CHECK (horas_delta <> 0)
-    )
-  `;
-
-  await executor.$executeRaw`
-    CREATE INDEX IF NOT EXISTS idx_staff_jornada_staff_id
-    ON public.staff_jornada_semanal(staff_id)
-  `;
-
-  await executor.$executeRaw`
-    CREATE INDEX IF NOT EXISTS idx_staff_jornada_dia
-    ON public.staff_jornada_semanal(dia_semana)
-  `;
-
-  await executor.$executeRaw`
-    CREATE UNIQUE INDEX IF NOT EXISTS idx_staff_jornada_staff_day_time_uq
-    ON public.staff_jornada_semanal(staff_id, dia_semana, hora_entrada, hora_salida)
-  `;
-
-  await executor.$executeRaw`
-    CREATE INDEX IF NOT EXISTS idx_staff_pausas_staff_id
-    ON public.staff_pausas_programadas(staff_id)
-  `;
-
-  await executor.$executeRaw`
-    CREATE INDEX IF NOT EXISTS idx_staff_pausas_dia
-    ON public.staff_pausas_programadas(dia_semana)
-  `;
-
-  await executor.$executeRaw`
-    CREATE INDEX IF NOT EXISTS idx_staff_pausas_tipo
-    ON public.staff_pausas_programadas(tipo_pausa)
-  `;
-
-  await executor.$executeRaw`
-    CREATE INDEX IF NOT EXISTS idx_staff_balance_movimientos_staff_id
-    ON public.staff_balance_movimientos(staff_id)
-  `;
-
-  await executor.$executeRaw`
-    CREATE INDEX IF NOT EXISTS idx_staff_balance_movimientos_created_at
-    ON public.staff_balance_movimientos(created_at DESC)
-  `;
+const ensureStaffHorarioLaboralSchema = async () => {
+  // These tables should be created by migrations
+  // Attempting to create them at runtime on Supabase causes timeouts
+  // This function is a no-op - tables must exist from initial migration
+  console.log("[staff-schema] Skipping dynamic schema creation (should use migrations)");
 };
 
-const ensureStaffSecuritySchema = async (executor: SqlExecutor) => {
-  await executor.$executeRaw`
-    CREATE TABLE IF NOT EXISTS public.staff_credentials (
-      staff_id uuid PRIMARY KEY REFERENCES public.staff(id) ON DELETE CASCADE,
-      password_hash text NOT NULL,
-      password_algo varchar(32) NOT NULL DEFAULT 'scrypt',
-      created_at timestamptz NOT NULL DEFAULT now(),
-      password_updated_at timestamptz NOT NULL DEFAULT now()
-    )
-  `;
-
-  await executor.$executeRaw`
-    CREATE INDEX IF NOT EXISTS idx_staff_credentials_updated_at
-    ON public.staff_credentials(password_updated_at)
-  `;
-
-  await executor.$executeRaw`
-    CREATE TABLE IF NOT EXISTS public.habilidades (
-      id uuid PRIMARY KEY DEFAULT gen_random_uuid(),
-      nombre varchar(120) NOT NULL UNIQUE
-    )
-  `;
-
-  await executor.$executeRaw`
-    CREATE TABLE IF NOT EXISTS public.staff_habilidades (
-      id uuid PRIMARY KEY DEFAULT gen_random_uuid(),
-      staff_id uuid NOT NULL REFERENCES public.staff(id) ON DELETE CASCADE,
-      habilidad_id uuid NOT NULL REFERENCES public.habilidades(id) ON DELETE RESTRICT,
-      CONSTRAINT staff_habilidades_staff_habilidad_uq UNIQUE (staff_id, habilidad_id)
-    )
-  `;
-
-  await executor.$executeRaw`
-    CREATE INDEX IF NOT EXISTS idx_staff_habilidades_staff_id
-    ON public.staff_habilidades(staff_id)
-  `;
-
-  await executor.$executeRaw`
-    CREATE INDEX IF NOT EXISTS idx_staff_habilidades_habilidad_id
-    ON public.staff_habilidades(habilidad_id)
-  `;
+const ensureStaffSecuritySchema = async () => {
+  // These tables should be created by migrations
+  // Attempting to create them at runtime on Supabase causes timeouts
+  // This function is a no-op - tables must exist from initial migration
+  console.log("[staff-schema] Skipping dynamic schema creation (should use migrations)");
 };
 
 const ensureStaffHorarioLaboralSchemaReady = async () => {
   if (!ensureStaffHorarioLaboralSchemaPromise) {
-    ensureStaffHorarioLaboralSchemaPromise = ensureStaffHorarioLaboralSchema(prisma).catch((error) => {
+    ensureStaffHorarioLaboralSchemaPromise = ensureStaffHorarioLaboralSchema().catch((error) => {
       ensureStaffHorarioLaboralSchemaPromise = null;
       throw error;
     });
@@ -333,7 +185,7 @@ const ensureStaffHorarioLaboralSchemaReady = async () => {
 
 const ensureStaffSecuritySchemaReady = async () => {
   if (!ensureStaffSecuritySchemaPromise) {
-    ensureStaffSecuritySchemaPromise = ensureStaffSecuritySchema(prisma).catch((error) => {
+    ensureStaffSecuritySchemaPromise = ensureStaffSecuritySchema().catch((error) => {
       ensureStaffSecuritySchemaPromise = null;
       throw error;
     });

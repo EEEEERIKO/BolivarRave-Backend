@@ -348,6 +348,31 @@ export const updateInventoryGroup = async (groupId: string, payload: { name: str
   return { id: rows[0].id };
 };
 
+const getInventoryItemById = async (itemId: string) => {
+  const rows = await prisma.$queryRaw<InventoryItemRow[]>`
+    SELECT
+      i.id::text AS id,
+      i.group_id::text AS "groupId",
+      g.nombre AS "groupName",
+      g.icono AS "groupIcon",
+      i.nombre AS name,
+      i.codigo AS code,
+      i.salon AS room,
+      i.estado AS status,
+      i.defectuoso AS defective,
+      i.motivo AS motivo,
+      i.orden AS "order",
+      TO_CHAR(i.created_at, 'YYYY-MM-DD"T"HH24:MI:SS.MS"Z"') AS "createdAt",
+      TO_CHAR(i.updated_at, 'YYYY-MM-DD"T"HH24:MI:SS.MS"Z"') AS "updatedAt"
+    FROM public.inventory_items i
+    INNER JOIN public.inventory_groups g ON g.id = i.group_id
+    WHERE i.id = ${itemId}::uuid
+    LIMIT 1
+  `;
+
+  return rows[0] ?? null;
+};
+
 export const deleteInventoryGroup = async (groupId: string) => {
   await ensureInventorySchemaReady();
 
@@ -424,7 +449,37 @@ export const updateInventoryItem = async (itemId: string, payload: {
     throw new Error("No se encontro el elemento de inventario");
   }
 
-  return { id: rows[0].id };
+  const updated = await getInventoryItemById(rows[0].id);
+  if (!updated) {
+    throw new Error("No se encontro el elemento de inventario");
+  }
+
+  return updated;
+};
+
+export const markInventoryItemDefective = async (itemId: string, motivo: string) => {
+  await ensureInventorySchemaReady();
+
+  const rows = await prisma.$queryRaw<Array<{ id: string }>>`
+    UPDATE public.inventory_items
+    SET
+      defectuoso = true,
+      motivo = ${motivo},
+      updated_at = now()
+    WHERE id = ${itemId}::uuid
+    RETURNING id::text AS id
+  `;
+
+  if (!rows[0]?.id) {
+    throw new Error("No se encontro el elemento de inventario");
+  }
+
+  const updated = await getInventoryItemById(rows[0].id);
+  if (!updated) {
+    throw new Error("No se encontro el elemento de inventario");
+  }
+
+  return updated;
 };
 
 export const deleteInventoryItem = async (itemId: string) => {
