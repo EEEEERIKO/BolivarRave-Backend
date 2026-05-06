@@ -250,6 +250,9 @@ const ensureOverlapValidationFunction = async () => {
         and (v_target_date is null or
             (v_target_date >= v_nuevo_inicio and v_target_date <= v_nuevo_fin and
              v_target_date >= e.fecha_inicio and v_target_date <= e.fecha_fin))
+        -- If a specific target date is provided (used for "always" scoped updates),
+        -- ignore existing events that have already ended before that target date.
+        and (v_target_date is null or e.fecha_fin >= v_target_date)
         and (v_target_date is not null or
              daterange(v_nuevo_inicio, v_nuevo_fin, '[]') && daterange(e.fecha_inicio, e.fecha_fin, '[]'))
         and (p_horario_id is null or h.id <> p_horario_id)

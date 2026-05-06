@@ -374,11 +374,17 @@ staffRouter.post("/login", async (req, res, next) => {
   try {
     const parsed = loginBodySchema.parse(req.body);
 
-    const session = await authenticateStaffLogin({
-      cedula: parsed.cedula,
-      portal: parsed.portal,
-      ...(parsed.password ? { password: parsed.password } : {}),
-    });
+    const loginTimeoutMs = 8000;
+    const session = (await Promise.race([
+      authenticateStaffLogin({
+        cedula: parsed.cedula,
+        portal: parsed.portal,
+        ...(parsed.password ? { password: parsed.password } : {}),
+      }),
+      new Promise((_, reject) =>
+        setTimeout(() => reject(new Error("ETIMEDOUT")), loginTimeoutMs)
+      ),
+    ])) as Awaited<ReturnType<typeof authenticateStaffLogin>>;
 
     const accessToken = signAuthToken({
       staffId: session.staffId,
@@ -403,6 +409,21 @@ staffRouter.post("/login", async (req, res, next) => {
 
     if (error instanceof StaffAuthError) {
       return res.status(error.status).json({ error: error.message });
+    }
+
+    const errorMessage = error instanceof Error ? error.message : String(error);
+    const isDbError =
+      errorMessage.includes("ETIMEDOUT") ||
+      errorMessage.includes("ECONNREFUSED") ||
+      errorMessage.includes("P1001") ||
+      errorMessage.includes("P1008") ||
+      errorMessage.includes("connection pool") ||
+      errorMessage.includes("timeout");
+
+    if (isDbError) {
+      return res.status(503).json({
+        error: "El servidor no puede conectarse a la base de datos en este momento. Inténtalo de nuevo en unos segundos.",
+      });
     }
 
     return next(error);
