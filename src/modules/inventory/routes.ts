@@ -7,6 +7,7 @@ import {
   deleteInventoryGroup,
   deleteInventoryItem,
   ensureInventorySchemaReady,
+  markInventoryItemDefective,
   listInventoryGroups,
   listInventoryItems,
   updateInventoryGroup,
@@ -106,7 +107,7 @@ inventoryRouter.get("/items", requireAdminOrMonitorRole, async (req, res, next) 
   }
 });
 
-inventoryRouter.post("/groups", requireAdminRole, async (req, res, next) => {
+inventoryRouter.post("/groups", requireAdminOrMonitorRole, async (req, res, next) => {
   try {
     const parsed = groupBodySchema.parse(req.body);
     const created = await createInventoryGroup({
@@ -129,7 +130,7 @@ inventoryRouter.post("/groups", requireAdminRole, async (req, res, next) => {
   }
 });
 
-inventoryRouter.put("/groups/:id", requireAdminRole, async (req, res, next) => {
+inventoryRouter.put("/groups/:id", requireAdminOrMonitorRole, async (req, res, next) => {
   try {
     const params = idParamsSchema.parse(req.params);
     const parsed = groupBodySchema.parse(req.body);
@@ -171,7 +172,7 @@ inventoryRouter.delete("/groups/:id", requireAdminRole, async (req, res, next) =
   }
 });
 
-inventoryRouter.post("/items", requireAdminRole, async (req, res, next) => {
+inventoryRouter.post("/items", requireAdminOrMonitorRole, async (req, res, next) => {
   try {
     const parsed = itemBodySchema.parse(req.body);
     const created = await createInventoryItem({
@@ -199,7 +200,28 @@ inventoryRouter.post("/items", requireAdminRole, async (req, res, next) => {
   }
 });
 
-inventoryRouter.put("/items/:id", requireAdminRole, async (req, res, next) => {
+inventoryRouter.put("/items/:id/defective", requireAdminOrMonitorRole, async (req, res, next) => {
+  try {
+    const params = idParamsSchema.parse(req.params);
+    const bodySchema = z.object({ motivo: z.string().trim().min(1).max(500) });
+    const parsed = bodySchema.parse(req.body);
+    const updated = await markInventoryItemDefective(params.id, parsed.motivo);
+
+    return res.json({ message: "Elemento marcado como defectuoso correctamente", item: updated });
+  } catch (error) {
+    if (error instanceof z.ZodError) {
+      return res.status(400).json({ error: `Payload invalido: ${error.issues[0]?.message ?? "error de validacion"}` });
+    }
+
+    if (handleKnownInventoryError(error, res)) {
+      return;
+    }
+
+    return next(error);
+  }
+});
+
+inventoryRouter.put("/items/:id", requireAdminOrMonitorRole, async (req, res, next) => {
   try {
     const params = idParamsSchema.parse(req.params);
     const parsed = itemBodySchema.parse(req.body);
@@ -228,7 +250,7 @@ inventoryRouter.put("/items/:id", requireAdminRole, async (req, res, next) => {
   }
 });
 
-inventoryRouter.delete("/items/:id", requireAdminRole, async (req, res, next) => {
+inventoryRouter.delete("/items/:id", requireAdminOrMonitorRole, async (req, res, next) => {
   try {
     const params = idParamsSchema.parse(req.params);
     const deleted = await deleteInventoryItem(params.id);

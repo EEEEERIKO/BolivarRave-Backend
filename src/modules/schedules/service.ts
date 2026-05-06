@@ -250,9 +250,6 @@ const ensureOverlapValidationFunction = async () => {
         and (v_target_date is null or
             (v_target_date >= v_nuevo_inicio and v_target_date <= v_nuevo_fin and
              v_target_date >= e.fecha_inicio and v_target_date <= e.fecha_fin))
-        -- If a specific target date is provided (used for "always" scoped updates),
-        -- ignore existing events that have already ended before that target date.
-        and (v_target_date is null or e.fecha_fin >= v_target_date)
         and (v_target_date is not null or
              daterange(v_nuevo_inicio, v_nuevo_fin, '[]') && daterange(e.fecha_inicio, e.fecha_fin, '[]'))
         and (p_horario_id is null or h.id <> p_horario_id)
@@ -310,10 +307,10 @@ const ensureOverlapValidationFunction = async () => {
       from public.eventos e
       where e.id = new.evento_id;
 
-      v_target_date := null;
-      if v_evento_inicio is not null and v_evento_fin is not null and v_evento_inicio = v_evento_fin then
-        v_target_date := v_evento_inicio;
-      end if;
+      v_target_date := greatest(
+        coalesce(v_evento_inicio, (timezone('America/Bogota', now()))::date),
+        (timezone('America/Bogota', now()))::date
+      );
 
       perform public.verificar_solape_horario(
         new.evento_id,
@@ -1273,10 +1270,11 @@ export const updateScheduleEventSlot = async (payload: UpdateScheduleEventSlotIn
       }
 
       const targetDateIso = toIsoDate(payload.targetDate);
+      const effectiveTargetDateIso = maxIsoDate(targetDateIso, getColombiaTodayIsoDate());
       const eventStart = currentEventRow.fecha_inicio;
       const eventEnd = currentEventRow.fecha_fin;
 
-      if (targetDateIso < eventStart || targetDateIso > eventEnd) {
+      if (effectiveTargetDateIso < eventStart || effectiveTargetDateIso > eventEnd) {
         throw new Error("La fecha seleccionada no pertenece al rango activo de la clase");
       }
 
@@ -1299,9 +1297,9 @@ export const updateScheduleEventSlot = async (payload: UpdateScheduleEventSlotIn
         LEFT JOIN public.solicitudes_salon sr ON sr.evento_id = e.id
         LEFT JOIN public.horarios_evento_excepciones x
           ON x.horario_id = h.id
-         AND x.fecha = ${targetDateIso}::date
+         AND x.fecha = ${effectiveTargetDateIso}::date
         LEFT JOIN public.salones sx ON sx.id = x.salon_id
-        WHERE ${targetDateIso}::date BETWEEN e.fecha_inicio AND e.fecha_fin
+        WHERE ${effectiveTargetDateIso}::date BETWEEN e.fecha_inicio AND e.fecha_fin
           AND COALESCE(x.dia_semana, h.dia_semana) = ${canonicalDay}::public.dia_semana_enum
           AND COALESCE(x.salon_id, h.salon_id) = ${salonId}::uuid
           AND (${payload.startTime}::time < COALESCE(x.hora_fin, h.hora_fin)
@@ -1336,7 +1334,7 @@ export const updateScheduleEventSlot = async (payload: UpdateScheduleEventSlotIn
         )
         VALUES (
           ${payload.slotId}::uuid,
-          ${targetDateIso}::date,
+          ${effectiveTargetDateIso}::date,
           ${canonicalDay}::public.dia_semana_enum,
           ${salonId}::uuid,
           ${payload.startTime}::time,
@@ -1371,14 +1369,14 @@ export const updateScheduleEventSlot = async (payload: UpdateScheduleEventSlotIn
           FROM public.horarios_evento_excepciones x
           INNER JOIN public.salones s ON s.id = x.salon_id
           WHERE x.horario_id = ${payload.slotId}::uuid
-            AND x.fecha = ${targetDateIso}::date
+            AND x.fecha = ${effectiveTargetDateIso}::date
           LIMIT 1
         `;
 
         console.log("[Schedules][week-update] persisted override", {
           eventId: payload.eventId,
           slotId: payload.slotId,
-          targetDate: targetDateIso,
+          targetDate: effectiveTargetDateIso,
           found: Boolean(persistedOverride[0]),
           override: persistedOverride[0] ?? null,
         });
@@ -1404,7 +1402,8 @@ export const updateScheduleEventSlot = async (payload: UpdateScheduleEventSlotIn
     const eventStartIso = currentEventRow.fecha_inicio;
     const eventEndIso = currentEventRow.fecha_fin;
     const targetDateIso = payload.targetDate ? toIsoDate(payload.targetDate) : getColombiaTodayIsoDate();
-    const effectiveStartIso = maxIsoDate(eventStartIso, targetDateIso);
+    const effectiveTargetDateIso = maxIsoDate(targetDateIso, getColombiaTodayIsoDate());
+    const effectiveStartIso = maxIsoDate(eventStartIso, effectiveTargetDateIso);
 
     if (effectiveStartIso <= eventEndIso) {
       const conflict = await tx.$queryRaw<
