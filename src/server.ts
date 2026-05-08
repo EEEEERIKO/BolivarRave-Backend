@@ -5,6 +5,7 @@ import { createServer } from "http";
 import rateLimit from "express-rate-limit";
 import { schedulesRouter } from "./modules/schedules/routes";
 import { auditorioRouter } from "./modules/auditorio/routes";
+import { reservasRouter } from "./modules/reservas/routes";
 import { inventoryRouter } from "./modules/inventory/routes";
 import { staffRouter } from "./modules/staff/routes";
 import { tasksRouter } from "./modules/tasks/routes";
@@ -115,11 +116,16 @@ app.use("/api", (req, res, next) => {
     return next();
   }
 
+  if (req.path.startsWith("/reservas/") && req.path.endsWith("/confirm")) {
+    return next();
+  }
+
   return requireAuthToken(req, res, next);
 });
 
 app.use("/api/schedules", schedulesRouter);
 app.use("/api/auditorio", auditorioRouter);
+app.use("/api/reservas", reservasRouter);
 app.use("/api/inventory", inventoryRouter);
 app.use("/api/staff", staffRouter);
 app.use("/api/tasks", requireAdminOrMonitorRole, tasksRouter);

@@ -49,6 +49,7 @@ const itemBodySchema = z.object({
   defective: z.boolean().default(false),
   motivo: z.string().trim().max(500).nullable().optional(),
   order: z.number().int().min(0).optional(),
+  price: z.number().nonnegative().optional(),
 });
 
 const idParamsSchema = z.object({
@@ -184,6 +185,7 @@ inventoryRouter.post("/items", requireAdminOrMonitorRole, async (req, res, next)
       defective: parsed.defective,
       motivo: parsed.motivo ?? null,
       ...(parsed.order !== undefined ? { order: parsed.order } : {}),
+      ...(parsed.price !== undefined ? { price: parsed.price } : {}),
     });
 
     return res.status(201).json({ message: "Elemento creado correctamente", id: created.id });
@@ -234,6 +236,7 @@ inventoryRouter.put("/items/:id", requireAdminOrMonitorRole, async (req, res, ne
       defective: parsed.defective,
       motivo: parsed.motivo ?? null,
       ...(parsed.order !== undefined ? { order: parsed.order } : {}),
+      ...(parsed.price !== undefined ? { price: parsed.price } : {}),
     });
 
     return res.json({ message: "Elemento actualizado correctamente", id: updated.id });

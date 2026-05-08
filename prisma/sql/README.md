@@ -16,6 +16,7 @@ Run only:
 - [014_enable_rls_for_staff_tasks_auditorio.sql](014_enable_rls_for_staff_tasks_auditorio.sql)
 - [015_schedule_requests_schema.sql](015_schedule_requests_schema.sql)
 - [016_auditorio_event_staff_assignments.sql](016_auditorio_event_staff_assignments.sql)
+- [017_reservas_solicitudes_schema.sql](017_reservas_solicitudes_schema.sql)
 
 This single file creates:
 
@@ -67,6 +68,11 @@ And [016_auditorio_event_staff_assignments.sql](016_auditorio_event_staff_assign
 
 - `auditorio_reserva_encargados`
 - asignacion de uno o varios trabajadores encargados por reserva de auditorio
+
+And [017_reservas_solicitudes_schema.sql](017_reservas_solicitudes_schema.sql) creates:
+
+- `reservas_solicitudes`
+- solicitudes de reserva para salones y equipos con estado de seguimiento
 
 And [012_staff_horario_laboral_schema.sql](012_staff_horario_laboral_schema.sql) creates:
 
