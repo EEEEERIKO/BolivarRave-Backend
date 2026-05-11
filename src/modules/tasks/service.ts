@@ -1367,6 +1367,41 @@ export const assignTaskToStaff = async (payload: AssignTaskInput) => {
   });
 };
 
+export const unlinkTaskAssignment = async (asignacionId: string) => {
+  return prisma.$transaction(async (tx) => {
+    const deleted = await tx.$queryRaw<Array<{ id: string; tarea_instancia_id: string }>>`
+      DELETE FROM public.tareas_asignaciones
+      WHERE id = ${asignacionId}::uuid
+      RETURNING id::text AS id, tarea_instancia_id::text AS tarea_instancia_id
+    `;
+
+    const row = deleted[0];
+    if (!row?.id) {
+      throw new Error("No se encontro la asignacion de tarea");
+    }
+
+    return { asignacionId: row.id, tareaInstanciaId: row.tarea_instancia_id };
+  });
+};
+
+export const unlinkCatalogTaskStaff = async (payload: { tareaCatalogoId: string; staffId: string }) => {
+  return prisma.$transaction(async (tx) => {
+    const deleted = await tx.$queryRaw<Array<{ tarea_catalogo_id: string; staff_id: string }>>`
+      DELETE FROM public.tareas_catalogo_staff
+      WHERE tarea_catalogo_id = ${payload.tareaCatalogoId}::uuid
+        AND staff_id = ${payload.staffId}::uuid
+      RETURNING tarea_catalogo_id::text AS tarea_catalogo_id, staff_id::text AS staff_id
+    `;
+
+    const row = deleted[0];
+    if (!row?.tarea_catalogo_id || !row?.staff_id) {
+      throw new Error("No se encontro la asignacion predefinida de la tarea");
+    }
+
+    return { tareaCatalogoId: row.tarea_catalogo_id, staffId: row.staff_id };
+  });
+};
+
 export const markTaskInProgress = async (asignacionId: string) => {
   return prisma.$transaction(async (tx) => {
     const assignment = await tx.$queryRaw<Array<{ id: string; tarea_instancia_id: string }>>`

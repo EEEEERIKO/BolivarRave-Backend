@@ -17,6 +17,8 @@ import {
   listHabilidades,
   listStaffHabilidades,
   markTaskInProgress,
+  unlinkCatalogTaskStaff,
+  unlinkTaskAssignment,
   unlinkStaffHabilidad,
   reviewTaskAssignment,
   sendTaskToReview,
@@ -491,6 +493,45 @@ tasksRouter.post("/assignments", requireAdminKey, async (req, res, next) => {
   } catch (error) {
     if (error instanceof z.ZodError) {
       return res.status(400).json({ error: `Payload invalido: ${error.issues[0]?.message ?? "error de validacion"}` });
+    }
+
+    return next(error);
+  }
+});
+
+tasksRouter.delete("/assignments/:id", requireAdminKey, async (req, res, next) => {
+  try {
+    const { id } = idParamsSchema.parse(req.params);
+    const deleted = await unlinkTaskAssignment(id);
+
+    return res.json({
+      message: "Asignacion eliminada correctamente",
+      asignacionId: deleted.asignacionId,
+      tareaInstanciaId: deleted.tareaInstanciaId,
+    });
+  } catch (error) {
+    if (error instanceof z.ZodError) {
+      return res.status(400).json({ error: `Parametros invalidos: ${error.issues[0]?.message ?? "error de validacion"}` });
+    }
+
+    return next(error);
+  }
+});
+
+tasksRouter.delete("/catalog/:id/staff/:staffId", requireAdminKey, async (req, res, next) => {
+  try {
+    const { id } = idParamsSchema.parse(req.params);
+    const staffId = z.string().uuid().parse(req.params.staffId);
+    const deleted = await unlinkCatalogTaskStaff({ tareaCatalogoId: id, staffId });
+
+    return res.json({
+      message: "Asignacion predefinida eliminada correctamente",
+      tareaCatalogoId: deleted.tareaCatalogoId,
+      staffId: deleted.staffId,
+    });
+  } catch (error) {
+    if (error instanceof z.ZodError) {
+      return res.status(400).json({ error: `Parametros invalidos: ${error.issues[0]?.message ?? "error de validacion"}` });
     }
 
     return next(error);
