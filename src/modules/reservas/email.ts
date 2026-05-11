@@ -1,6 +1,4 @@
 import { Resend } from "resend";
-import fs from "fs";
-import path from "path";
 
 const resend = new Resend(process.env.RESEND_API_KEY);
 
@@ -23,26 +21,7 @@ const getConfirmationUrl = (reservationId: string, token: string): string => {
   return `${baseUrl}/reservas/confirm?reservationId=${reservationId}&token=${token}`;
 };
 
-const getFrontendBaseUrl = (): string => {
-  const baseUrl = (process.env.FRONTEND_URL ?? "http://localhost:3000").trim();
-  return baseUrl.replace(/\/+$/, "");
-};
 
-const tryReadLogoDataUri = (): string | null => {
-  try {
-    // Resolve logo path relative to the backend working directory into the frontend public folder
-    const candidate = path.resolve(process.cwd(), "../frontend/public/logo.png");
-    if (fs.existsSync(candidate)) {
-      const buf = fs.readFileSync(candidate);
-      const b64 = buf.toString("base64");
-      return `data:image/png;base64,${b64}`;
-    }
-  } catch (err) {
-    // ignore and fallback to remote URL
-  }
-
-  return null;
-};
 
 const escapeHtml = (value: string): string =>
   value
@@ -58,9 +37,6 @@ const formatReservationType = (resourceType: string): string => {
 
 const buildEmailHtml = (data: ReservationEmailData): string => {
   const confirmUrl = getConfirmationUrl(data.id, data.confirmationToken);
-  const frontendBaseUrl = getFrontendBaseUrl();
-  const inlineLogo = tryReadLogoDataUri();
-  const logoUrl = inlineLogo || `${frontendBaseUrl}/logo.png`;
   const resourceType = formatReservationType(data.resourceType);
   const resourceLabel = escapeHtml(data.resourceLabel);
   const requesterName = escapeHtml(data.requesterName);
@@ -79,297 +55,285 @@ const buildEmailHtml = (data: ReservationEmailData): string => {
   <head>
     <meta charset="utf-8">
     <meta name="viewport" content="width=device-width, initial-scale=1">
-    <meta name="theme-color" content="#295786">
     <style>
       :root {
-        color-scheme: light;
-        --bg: #eef4fb;
-        --card: #ffffff;
-        --primary: #295786;
-        --primary-strong: #1f4a74;
-        --accent: #9f403d;
-        --text: #1f2937;
-        --muted: #5b6775;
-        --line: #d9e3ef;
-        --success: #18864b;
+        --primary: #1a3a52;
+        --secondary: #2d5a7b;
+        --accent: #c94c4c;
+        --success: #2d7a3a;
+        --gray-900: #111827;
+        --gray-700: #374151;
+        --gray-600: #4b5563;
+        --gray-500: #6b7280;
+        --gray-300: #d1d5db;
+        --gray-200: #e5e7eb;
+        --gray-50: #f9fafb;
+      }
+
+      * {
+        margin: 0;
+        padding: 0;
+        box-sizing: border-box;
       }
 
       body {
-        font-family: 'Segoe UI', Tahoma, Geneva, Verdana, sans-serif;
-        margin: 0;
-        padding: 24px;
+        font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', 'Helvetica Neue', sans-serif;
+        font-size: 14px;
         line-height: 1.6;
-        color: var(--text);
-        background:
-          radial-gradient(circle at top left, rgba(41, 87, 134, 0.14), transparent 34%),
-          radial-gradient(circle at top right, rgba(159, 64, 61, 0.12), transparent 28%),
-          linear-gradient(180deg, #f6f9fc 0%, var(--bg) 100%);
+        color: var(--gray-900);
+        background-color: var(--gray-50);
       }
 
-      .container {
-        max-width: 760px;
+      .email-wrapper {
+        max-width: 640px;
         margin: 0 auto;
-        overflow: hidden;
-        border: 1px solid rgba(41, 87, 134, 0.14);
-        border-radius: 28px;
-        background: var(--card);
-        box-shadow: 0 24px 60px rgba(24, 39, 75, 0.15);
+        background-color: white;
       }
 
       .header {
-        padding: 28px;
-        border-bottom: 1px solid var(--line);
-        background: linear-gradient(135deg, rgba(41, 87, 134, 0.08), rgba(159, 64, 61, 0.06));
+        background: linear-gradient(135deg, var(--primary) 0%, var(--secondary) 100%);
+        color: white;
+        padding: 40px 32px;
+        text-align: center;
       }
 
-      .brand {
-        display: flex;
-        align-items: center;
-        gap: 14px;
-        margin-bottom: 18px;
-      }
-
-      .brand img {
-        width: 56px;
-        height: 56px;
-        object-fit: contain;
-        border-radius: 14px;
-        background: white;
-        border: 1px solid var(--line);
-        padding: 6px;
-      }
-
-      .brand-copy small {
-        display: block;
-        color: var(--muted);
-        font-size: 12px;
+      .header h1 {
+        font-size: 24px;
         font-weight: 700;
-        letter-spacing: 0.16em;
-        text-transform: uppercase;
+        letter-spacing: -0.5px;
+        margin-bottom: 4px;
       }
 
-      .brand-copy h1 {
-        margin: 4px 0 0;
-        font-size: 22px;
-        line-height: 1.1;
-        color: var(--primary);
+      .header p {
+        font-size: 13px;
+        opacity: 0.95;
+        font-weight: 500;
       }
 
-      .pill {
+      .success-badge {
         display: inline-flex;
         align-items: center;
-        gap: 8px;
-        width: fit-content;
-        border-radius: 999px;
-        padding: 10px 14px;
-        font-size: 13px;
+        justify-content: center;
+        width: 56px;
+        height: 56px;
+        background-color: rgba(255, 255, 255, 0.15);
+        border-radius: 50%;
+        color: white;
+        font-size: 28px;
+        margin-bottom: 16px;
         font-weight: 700;
-        background: rgba(24, 134, 75, 0.1);
-        color: var(--success);
       }
 
       .content {
-        padding: 28px;
+        padding: 40px 32px;
       }
 
-      .headline {
-        margin: 16px 0 8px;
-        font-size: clamp(28px, 4vw, 40px);
-        line-height: 1.05;
-        color: var(--text);
-      }
-
-      .lead {
-        margin: 0;
+      .greeting {
         font-size: 16px;
-        color: var(--muted);
+        color: var(--gray-900);
+        margin-bottom: 28px;
+        font-weight: 500;
       }
 
-      .details {
-        margin-top: 22px;
+      .details-grid {
         display: grid;
-        gap: 14px;
-        grid-template-columns: repeat(auto-fit, minmax(220px, 1fr));
+        grid-template-columns: 1fr 1fr;
+        gap: 16px;
+        margin: 28px 0;
+        background-color: var(--gray-50);
+        padding: 24px;
+        border-radius: 8px;
+        border: 1px solid var(--gray-200);
       }
 
-      .detail-row {
-        border: 1px solid var(--line);
-        border-radius: 20px;
-        background: #fbfdff;
-        padding: 18px;
+      .detail-item {
+        display: flex;
+        flex-direction: column;
       }
 
       .detail-label {
-        display: block;
         font-size: 11px;
-        letter-spacing: 0.14em;
-        text-transform: uppercase;
-        color: var(--muted);
-        margin-bottom: 8px;
-        font-weight: 800;
-      }
-
-      .detail-value {
-        color: var(--text);
-        font-size: 15px;
         font-weight: 700;
-      }
-
-      .warning {
-        margin-top: 20px;
-        padding: 18px;
-        border: 1px solid rgba(159, 64, 61, 0.25);
-        border-radius: 20px;
-        background: linear-gradient(135deg, rgba(159, 64, 61, 0.08), rgba(41, 87, 134, 0.04));
-      }
-
-      .warning h2 {
-        margin: 0 0 8px;
-        color: var(--accent);
-        font-size: 18px;
-      }
-
-      .warning p {
-        margin: 0;
-        color: var(--text);
-      }
-
-      .button-container {
-        text-align: center;
-        margin: 24px 0 0;
-      }
-
-      .confirm-button {
-        display: inline-flex;
-        align-items: center;
-        justify-content: center;
-        background: linear-gradient(135deg, var(--primary), var(--primary-strong));
-        color: white;
-        padding: 14px 28px;
-        text-decoration: none;
-        border-radius: 999px;
-        font-weight: 800;
-        box-shadow: 0 12px 24px rgba(41, 87, 134, 0.25);
-      }
-
-      .footer {
-        text-align: center;
-        color: var(--muted);
-        font-size: 12px;
-        margin-top: 0;
-        border-top: 1px solid var(--line);
-        padding: 18px 28px 26px;
-      }
-
-      .footer strong {
-        color: var(--text);
-      }
-
-      .success-icon {
-        display: inline-flex;
-        align-items: center;
-        justify-content: center;
-        width: 72px;
-        height: 72px;
-        border-radius: 999px;
-        background: rgba(24, 134, 75, 0.12);
-        color: var(--success);
-        font-size: 34px;
-        font-weight: 900;
+        text-transform: uppercase;
+        letter-spacing: 0.5px;
+        color: var(--gray-500);
         margin-bottom: 6px;
       }
 
-      .muted-note {
-        margin-top: 14px;
-        color: var(--muted);
-        font-size: 13px;
+      .detail-value {
+        font-size: 15px;
+        font-weight: 600;
+        color: var(--gray-900);
       }
 
-      .copy-link {
-        margin-top: 14px;
-        color: var(--muted);
-        font-size: 12px;
+      .detail-item.full-width {
+        grid-column: 1 / -1;
+      }
+
+      .terms-box {
+        background-color: #fef9f0;
+        border-left: 4px solid var(--accent);
+        padding: 16px;
+        margin: 24px 0;
+        border-radius: 4px;
+      }
+
+      .terms-box h3 {
+        font-size: 14px;
+        font-weight: 700;
+        color: var(--accent);
+        margin-bottom: 8px;
+      }
+
+      .terms-box p {
+        font-size: 13px;
+        color: var(--gray-700);
+        margin-bottom: 8px;
+      }
+
+      .terms-box p:last-child {
+        margin-bottom: 0;
+      }
+
+      .action-button {
+        display: inline-block;
+        background: linear-gradient(135deg, var(--primary) 0%, var(--secondary) 100%);
+        color: white;
+        padding: 12px 32px;
+        text-decoration: none;
+        border-radius: 6px;
+        font-weight: 600;
+        font-size: 14px;
+        margin: 28px 0;
+      }
+
+      .fallback-link {
+        background-color: var(--gray-50);
+        padding: 16px;
+        border-radius: 6px;
+        border: 1px solid var(--gray-200);
+        margin: 16px 0;
         text-align: center;
       }
 
-      .copy-link code {
+      .fallback-link p {
+        font-size: 12px;
+        color: var(--gray-600);
+        margin-bottom: 8px;
+      }
+
+      .fallback-link code {
+        display: block;
+        background-color: white;
+        padding: 8px 12px;
+        border-radius: 4px;
         word-break: break-all;
+        font-size: 11px;
+        color: var(--gray-700);
+        font-family: 'Courier New', monospace;
+      }
+
+      .footer {
+        background-color: var(--gray-50);
+        border-top: 1px solid var(--gray-200);
+        padding: 28px 32px;
+        text-align: center;
+        font-size: 12px;
+        color: var(--gray-600);
+      }
+
+      .footer p {
+        margin-bottom: 6px;
+      }
+
+      .footer p:last-child {
+        margin-bottom: 0;
+        color: var(--gray-500);
+        font-size: 11px;
+      }
+
+      .divider {
+        height: 1px;
+        background-color: var(--gray-200);
+        margin: 24px 0;
       }
     </style>
   </head>
   <body>
-    <div class="container">
+    <div class="email-wrapper">
       <div class="header">
-        <div class="brand">
-          <img src="${logoUrl}" alt="UNAC Bolivar Logo">
-          <div class="brand-copy">
-            <small>UNAC</small>
-            <h1>Administración del Edificio Bolivar Rave</h1>
-          </div>
-        </div>
-        <span class="pill">Reserva confirmada</span>
+        <div class="success-badge">✓</div>
+        <h1>Reserva Confirmada</h1>
+        <p>Administración del Edificio Bolívar</p>
       </div>
-      
+
       <div class="content">
-        <div class="success-icon">✓</div>
-        <h1 class="headline">¡Reserva Confirmada!</h1>
-        <p class="lead">${requesterName}, tu solicitud ya quedó confirmada en el sistema.</p>
+        <p class="greeting">Estimado/a ${requesterName},</p>
         
-        <div class="details">
-          <div class="detail-row">
+        <p>Su solicitud de reserva ha sido confirmada exitosamente en nuestro sistema. A continuación encontrará los detalles de su reserva:</p>
+
+        <div class="details-grid">
+          <div class="detail-item">
             <span class="detail-label">Tipo de Recurso</span>
             <span class="detail-value">${resourceType}</span>
           </div>
-          <div class="detail-row">
+          <div class="detail-item">
             <span class="detail-label">Recurso</span>
             <span class="detail-value">${resourceLabel}</span>
           </div>
-          <div class="detail-row">
-            <span class="detail-label">Fecha de Reserva</span>
+          <div class="detail-item">
+            <span class="detail-label">Fecha</span>
             <span class="detail-value">${bookingDate}</span>
           </div>
-          <div class="detail-row">
+          <div class="detail-item">
             <span class="detail-label">Hora Inicio</span>
             <span class="detail-value">${startTime}</span>
           </div>
-          <div class="detail-row">
+          <div class="detail-item">
             <span class="detail-label">Hora Fin / Devolución</span>
             <span class="detail-value">${endTime}</span>
           </div>
-          <div class="detail-row">
+          <div class="detail-item">
             <span class="detail-label">Propósito</span>
             <span class="detail-value">${purpose}</span>
           </div>
           ${
             destinationRoom
-              ? `<div class="detail-row">
+              ? `<div class="detail-item full-width">
             <span class="detail-label">Ubicación de Entrega</span>
             <span class="detail-value">${destinationRoom}</span>
           </div>`
               : ""
           }
         </div>
-        
-        <div class="warning">
-          <h2>Importante</h2>
-          <p>${returnWarning}</p>
-          <p class="muted-note">El incumplimiento del horario o la entrega en mal estado puede conllevar observaciones administrativas o penalizaciones internas.</p>
+
+        <div class="terms-box">
+          <h3>⚠ Términos y Condiciones</h3>
+          <p><strong>${returnWarning}</strong></p>
+          <p>El incumplimiento de estas condiciones puede resultar en sanciones administrativas.</p>
         </div>
-        
-        <div class="button-container">
-          <a href="${confirmUrl}" class="confirm-button">Revisar confirmación</a>
+
+        <div style="text-align: center;">
+          <a href="${confirmUrl}" class="action-button">Revisar Reserva</a>
         </div>
-        
-        <p class="copy-link">
-          Si el botón anterior no funciona, copia y pega este enlace en tu navegador:<br>
+
+        <div class="fallback-link">
+          <p>Si el botón anterior no responde, copie y pegue este enlace en su navegador:</p>
           <code>${confirmUrl}</code>
+        </div>
+
+        <div class="divider"></div>
+
+        <p style="font-size: 13px; color: var(--gray-700); margin-bottom: 12px;">
+          Si tiene dudas sobre su reserva o necesita hacer cambios, por favor contáctese con el departamento de administración.
         </p>
       </div>
-      
+
       <div class="footer">
-        <p><strong>UNAC</strong> · Administración del Edificio Bolivar Rave</p>
-        <p>Este es un correo automático de la plataforma de reservas. Por favor no respondas a este correo.</p>
-        <p>&copy; 2026 UNAC Bolívar. Todos los derechos reservados.</p>
+        <p><strong>Universidad Autónoma de Nayarit (UNAC)</strong></p>
+        <p>Administración del Edificio Bolívar Rave</p>
+        <p>Este es un correo automático. Por favor, no responda a este mensaje.</p>
+        <p>&copy; 2026 UNAC. Todos los derechos reservados.</p>
       </div>
     </div>
   </body>
@@ -387,7 +351,7 @@ export const sendReservationConfirmationEmail = async (data: ReservationEmailDat
     const html = buildEmailHtml(data);
 
     const response = await resend.emails.send({
-      from: "onboarding@resend.dev",
+      from: "reservas@unac.edu.mx",
       to: data.requesterEmail,
       subject: `Confirmación de Reserva - ${data.resourceLabel}`,
       html,
