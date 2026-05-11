@@ -252,6 +252,7 @@ export const listInventoryItems = async (groupId?: string) => {
         i.estado AS status,
         i.defectuoso AS defective,
         i.motivo AS motivo,
+        COALESCE(i.precio, 0)::double precision AS price,
         i.orden AS "order",
         TO_CHAR(i.created_at, 'YYYY-MM-DD"T"HH24:MI:SS.MS"Z"') AS "createdAt",
         TO_CHAR(i.updated_at, 'YYYY-MM-DD"T"HH24:MI:SS.MS"Z"') AS "updatedAt"
@@ -276,7 +277,7 @@ export const listInventoryItems = async (groupId?: string) => {
       i.estado AS status,
       i.defectuoso AS defective,
       i.motivo AS motivo,
-      COALESCE(i.precio, 0)::numeric AS price,
+         COALESCE(i.precio, 0)::double precision AS price,
       i.orden AS "order",
       TO_CHAR(i.created_at, 'YYYY-MM-DD"T"HH24:MI:SS.MS"Z"') AS "createdAt",
       TO_CHAR(i.updated_at, 'YYYY-MM-DD"T"HH24:MI:SS.MS"Z"') AS "updatedAt"
@@ -369,7 +370,7 @@ const getInventoryItemById = async (itemId: string) => {
       i.estado AS status,
       i.defectuoso AS defective,
       i.motivo AS motivo,
-      COALESCE(i.precio, 0)::numeric AS price,
+         COALESCE(i.precio, 0)::double precision AS price,
       i.orden AS "order",
       TO_CHAR(i.created_at, 'YYYY-MM-DD"T"HH24:MI:SS.MS"Z"') AS "createdAt",
       TO_CHAR(i.updated_at, 'YYYY-MM-DD"T"HH24:MI:SS.MS"Z"') AS "updatedAt"
