@@ -116,10 +116,6 @@ app.use("/api", (req, res, next) => {
     return next();
   }
 
-  if (req.path.startsWith("/reservas/") && req.path.endsWith("/confirm")) {
-    return next();
-  }
-
   return requireAuthToken(req, res, next);
 });
 
