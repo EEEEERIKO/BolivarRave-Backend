@@ -351,7 +351,7 @@ export const sendReservationConfirmationEmail = async (data: ReservationEmailDat
     const html = buildEmailHtml(data);
 
     const response = await resend.emails.send({
-      from: "reservas@unac.edu.mx",
+      from: "reservas-bolivar@unac.edu.co",
       to: data.requesterEmail,
       subject: `Confirmación de Reserva - ${data.resourceLabel}`,
       html,
