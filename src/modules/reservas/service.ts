@@ -59,6 +59,7 @@ export type ReservationRequestRow = {
   requesterPhone: string | null;
   status: ReservationStatus;
   confirmationToken: string | null;
+  confirmationTokenExpiresAt: string | null;
   createdByStaffId: string;
   returnedAt: string | null;
   createdAt: string;
@@ -251,6 +252,7 @@ export const createReservationRequest = async (payload: CreateReservationInput) 
         requester_phone,
         status,
         confirmation_token,
+        confirmation_token_expires_at,
         created_by_staff_id
       )
       VALUES (
@@ -272,6 +274,7 @@ export const createReservationRequest = async (payload: CreateReservationInput) 
         ${payload.requesterPhone},
         'no_aceptado',
         ${confirmationToken},
+        now() + interval '24 hours',
         ${payload.createdByStaffId}::uuid
       )
       RETURNING id::text AS id
@@ -349,6 +352,7 @@ export const createReservationRequest = async (payload: CreateReservationInput) 
         requester_phone,
         status,
         confirmation_token,
+        confirmation_token_expires_at,
         created_by_staff_id
       )
       VALUES (
@@ -372,6 +376,7 @@ export const createReservationRequest = async (payload: CreateReservationInput) 
         ${payload.requesterPhone},
         'no_aceptado',
         ${confirmationToken},
+        now() + interval '24 hours',
         ${payload.createdByStaffId}::uuid
       )
       RETURNING id::text AS id
@@ -455,6 +460,18 @@ export const confirmReservationRequest = async (reservationId: string, token: st
 
   if (reservation.confirmationToken !== token) {
     throw new Error("Token de confirmacion invalido");
+  }
+
+  const now = new Date();
+  if (reservation.confirmationTokenExpiresAt) {
+    const expiryDate = new Date(reservation.confirmationTokenExpiresAt);
+    if (!Number.isFinite(expiryDate.getTime()) || now > expiryDate) {
+      throw new Error("El enlace de confirmación ha expirado. Por favor, solicita un nuevo enlace.");
+    }
+  }
+
+  if (!reservation.confirmationTokenExpiresAt && !reservation.createdAt) {
+    throw new Error("El enlace de confirmación ha expirado. Por favor, solicita un nuevo enlace.");
   }
 
   if (reservation.status === "confirmada") {

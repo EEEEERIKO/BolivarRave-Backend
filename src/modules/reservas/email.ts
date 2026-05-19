@@ -21,8 +21,6 @@ const getConfirmationUrl = (reservationId: string, token: string): string => {
   return `${baseUrl}/reservas/confirm?reservationId=${reservationId}&token=${token}`;
 };
 
-
-
 const escapeHtml = (value: string): string =>
   value
     .replace(/&/g, "&amp;")
@@ -95,6 +93,13 @@ const buildEmailHtml = (data: ReservationEmailData): string => {
         color: white;
         padding: 40px 32px;
         text-align: center;
+      }
+
+      .header-logo {
+        display: inline-block;
+        margin-bottom: 20px;
+        font-size: 28px;
+        font-weight: 700;
       }
 
       .header h1 {
@@ -252,25 +257,56 @@ const buildEmailHtml = (data: ReservationEmailData): string => {
         font-size: 11px;
       }
 
+      .footer-links {
+        margin-top: 12px;
+        padding-top: 12px;
+        border-top: 1px solid var(--gray-200);
+      }
+
+      .footer-links a {
+        color: var(--primary);
+        text-decoration: none;
+        font-weight: 600;
+        font-size: 12px;
+        margin: 0 12px;
+      }
+
       .divider {
         height: 1px;
         background-color: var(--gray-200);
         margin: 24px 0;
+      }
+
+      .warning-note {
+        background-color: #fff7f5;
+        border: 1px solid #fec8c3;
+        border-radius: 6px;
+        padding: 12px;
+        margin: 16px 0;
+        font-size: 12px;
+        color: #c94c4c;
+      }
+
+      .warning-note strong {
+        display: block;
+        font-weight: 700;
+        margin-bottom: 4px;
       }
     </style>
   </head>
   <body>
     <div class="email-wrapper">
       <div class="header">
-        <div class="success-badge">✓</div>
-        <h1>Reserva Confirmada</h1>
-        <p>Administración del Edificio Bolívar</p>
+        <div class="header-logo">🏫</div>
+        <h1>Aceptación de Términos de Reserva</h1>
+        <p>Debe aceptar las condiciones para finalizar su reserva</p>
+        <p><strong>UNAC</strong> - Administración del Edificio Bolívar</p>
       </div>
 
       <div class="content">
         <p class="greeting">Estimado/a ${requesterName},</p>
         
-        <p>Su solicitud de reserva ha sido confirmada exitosamente en nuestro sistema. A continuación encontrará los detalles de su reserva:</p>
+        <p>Hemos recibido su solicitud de reserva. Antes de finalizar y activar la reserva, debe revisar y aceptar las condiciones de uso del recurso solicitado.</p>
 
         <div class="details-grid">
           <div class="detail-item">
@@ -308,19 +344,34 @@ const buildEmailHtml = (data: ReservationEmailData): string => {
         </div>
 
         <div class="terms-box">
-          <h3>⚠ Términos y Condiciones</h3>
-          <p><strong>${returnWarning}</strong></p>
-          <p>El incumplimiento de estas condiciones puede resultar en sanciones administrativas.</p>
+          <h3>⚠ Responsabilidades del Usuario</h3>
+
+          <p>Al confirmar esta reserva, usted acepta:</p>
+          <p>• Utilizar el recurso únicamente para el propósito indicado.</p>
+          <p>• Mantener el salón/equipo en buen estado durante el periodo de préstamo.</p>
+          <p>• Devolver el recurso completo, limpio y en las mismas condiciones en las que fue entregado.</p>
+          <p>• Responder por daños, pérdida de componentes, uso indebido o retrasos en la devolución.</p>
+          <p>• Cumplir los horarios establecidos por la administración.</p>
+          <p>El incumplimiento de estas condiciones puede generar sanciones administrativas, suspensión temporal del servicio o cobros asociados a daños ocasionados.</p>
+        </div>
+
+        <div class="warning-note">
+          <strong>⏰ Importante</strong>
+          Este enlace de confirmación expira en 24 horas. Si no confirma su reserva en ese plazo, deberá solicitar un nuevo enlace.
         </div>
 
         <div style="text-align: center;">
-          <a href="${confirmUrl}" class="action-button">Revisar Reserva</a>
+          <a href="${confirmUrl}" class="action-button">Aceptar Términos y Confirmar Reserva</a>
         </div>
 
         <div class="fallback-link">
           <p>Si el botón anterior no responde, copie y pegue este enlace en su navegador:</p>
           <code>${confirmUrl}</code>
         </div>
+
+        <p style="font-size: 12px; color: #6b7280; margin-top: 16px;">
+          Al hacer clic en "Aceptar Términos y Confirmar Reserva", usted declara haber leído y aceptado las condiciones de uso y responsabilidad asociadas al préstamo del recurso solicitado.
+        </p>
 
         <div class="divider"></div>
 
@@ -332,6 +383,13 @@ const buildEmailHtml = (data: ReservationEmailData): string => {
       <div class="footer">
         <p><strong>Universidad Autónoma de Nayarit (UNAC)</strong></p>
         <p>Administración del Edificio Bolívar Rave</p>
+        
+        <div class="footer-links">
+          <a href="https://unac.edu.co">Sitio Web</a>
+          <a href="mailto:reservas@unac.edu.co">Contacto</a>
+          <a href="https://unac.edu.co/settings">Configuración</a>
+        </div>
+        
         <p>Este es un correo automático. Por favor, no responda a este mensaje.</p>
         <p>&copy; 2026 UNAC. Todos los derechos reservados.</p>
       </div>
@@ -351,9 +409,9 @@ export const sendReservationConfirmationEmail = async (data: ReservationEmailDat
     const html = buildEmailHtml(data);
 
     const response = await resend.emails.send({
-      from: "reservas-bolivar@unac.edu.co",
+      from: "bolivar-rave-reservas@unac.edu.co",
       to: data.requesterEmail,
-      subject: `Confirmación de Reserva - ${data.resourceLabel}`,
+      subject: `Acción Requerida - Confirmar Reserva de ${data.resourceLabel}`,
       html,
     });
 
