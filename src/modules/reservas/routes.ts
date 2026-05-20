@@ -13,6 +13,7 @@ import {
   reportReservationRequest,
   listReservationRequestsByCreator,
 } from "./service";
+import { prisma } from "../../lib/prisma";
 
 export const reservasRouter = Router();
 
@@ -174,7 +175,8 @@ reservasRouter.post("/", requireAuthToken, async (req, res, next) => {
     });
   } catch (error) {
     if (error instanceof z.ZodError) {
-      return res.status(400).json({ error: `Payload invalido: ${error.issues[0]?.message ?? "error de validacion"}` });
+      const details = error.issues.map((iss) => ({ path: iss.path.map(String).join('.') || 'body', message: iss.message }));
+      return res.status(400).json({ error: 'Payload invalido', details });
     }
 
     if (handleKnownReservationError(error, res)) {
@@ -196,7 +198,8 @@ reservasRouter.patch("/:reservationId/return", requireAdminOrMonitorRole, async 
     });
   } catch (error) {
     if (error instanceof z.ZodError) {
-      return res.status(400).json({ error: `Parametros invalidos: ${error.issues[0]?.message ?? "error de validacion"}` });
+      const details = error.issues.map((iss) => ({ path: iss.path.map(String).join('.') || 'params', message: iss.message }));
+      return res.status(400).json({ error: 'Parametros invalidos', details });
     }
 
     if (handleKnownReservationError(error, res)) {
@@ -221,7 +224,8 @@ reservasRouter.patch("/:reservationId/cancel", requireAuthToken, async (req, res
     return res.json({ message: "Solicitud cancelada correctamente.", reservationId: cancelled.id });
   } catch (error) {
     if (error instanceof z.ZodError) {
-      return res.status(400).json({ error: `Parametros invalidos: ${error.issues[0]?.message ?? "error de validacion"}` });
+      const details = error.issues.map((iss) => ({ path: iss.path.map(String).join('.') || 'params', message: iss.message }));
+      return res.status(400).json({ error: 'Parametros invalidos', details });
     }
 
     if (handleKnownReservationError(error, res)) {
@@ -246,7 +250,8 @@ reservasRouter.patch("/:reservationId/close", requireAuthToken, async (req, res,
     return res.json({ message: "Solicitud marcada como cerrada.", reservationId: closed.id });
   } catch (error) {
     if (error instanceof z.ZodError) {
-      return res.status(400).json({ error: `Parametros invalidos: ${error.issues[0]?.message ?? "error de validacion"}` });
+      const details = error.issues.map((iss) => ({ path: iss.path.map(String).join('.') || 'params', message: iss.message }));
+      return res.status(400).json({ error: 'Parametros invalidos', details });
     }
 
     if (handleKnownReservationError(error, res)) {
@@ -276,7 +281,8 @@ reservasRouter.patch("/:reservationId/report", requireAuthToken, async (req, res
     return res.json({ message: "Solicitud marcada como reportada.", reservationId: reported.id });
   } catch (error) {
     if (error instanceof z.ZodError) {
-      return res.status(400).json({ error: `Parametros invalidos: ${error.issues[0]?.message ?? "error de validacion"}` });
+      const details = error.issues.map((iss) => ({ path: iss.path.map(String).join('.') || 'params', message: iss.message }));
+      return res.status(400).json({ error: 'Parametros invalidos', details });
     }
 
     if (handleKnownReservationError(error, res)) {
@@ -292,7 +298,19 @@ reservasRouter.get("/:reservationId/confirm", async (req, res, next) => {
     const reservationId = z.string().uuid().parse(req.params.reservationId);
     const token = z.string().min(1).parse(req.query.token);
 
-    const confirmed = await confirmReservationRequest(reservationId, token as string);
+    // Debug mode: return raw DB fields for diagnosis when ?debug=1
+    const debugMode = String(req.query.debug || "").toLowerCase() === "1" || String(req.query.debug || "").toLowerCase() === "true";
+    if (debugMode) {
+      const rows = await prisma.$queryRaw`
+        SELECT confirmation_token, confirmation_token_expires_at, created_at
+        FROM public.reservas_solicitudes
+        WHERE id::text = ${reservationId}
+      `;
+      const row: any = (rows as any[])[0] ?? null;
+      return res.json({ debug: true, reservationId, token: token as string, db: row });
+    }
+
+    const confirmationResult = await confirmReservationRequest(reservationId, token as string);
     const reservation = await getReservationRequestById(reservationId);
 
     if (!reservation) {
@@ -306,7 +324,8 @@ reservasRouter.get("/:reservationId/confirm", async (req, res, next) => {
 
     if (wantsJson) {
       return res.json({
-        message: "Reserva confirmada",
+        message: confirmationResult.alreadyConfirmed ? "Esta solicitud ya estaba confirmada." : "Reserva confirmada",
+        alreadyConfirmed: confirmationResult.alreadyConfirmed,
         reservation: {
           id: reservation.id,
           resourceLabel: reservation.resourceLabel,

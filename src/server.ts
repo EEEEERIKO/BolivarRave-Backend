@@ -112,6 +112,12 @@ app.use("/api", (req, res, next) => {
     return next();
   }
 
+  // Public confirmation link from email: no authenticated session required.
+  const isPublicReservationConfirmation = req.method === "GET" && /^\/reservas\/[^/]+\/confirm$/.test(req.path);
+  if (isPublicReservationConfirmation) {
+    return next();
+  }
+
   if (PUBLIC_API_PATHS.has(req.path)) {
     return next();
   }

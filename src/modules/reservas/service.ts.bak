@@ -1,0 +1,733 @@
+import { prisma } from "../../lib/prisma";
+import { sendReservationConfirmationEmail, ReservationEmailData } from "./email";
+import { randomBytes } from "crypto";
+
+export type ReservationResourceType = "rooms" | "equipment";
+export type ReservationStatus = "no_aceptado" | "confirmada" | "devuelto" | "rechazada" | "cancelada" | "reportado";
+
+export type CreateReservationInput = {
+  resourceType: ReservationResourceType;
+  resourceId: string;
+  bookingDate: Date;
+  startTime: string;
+  endTime: string;
+  purpose: string;
+  requesterName: string;
+  requesterDocument: string;
+  requesterEmail: string | null;
+  requesterPhone: string | null;
+  termsAccepted?: boolean;
+  destinationRoomId: string | null;
+  createdByStaffId: string;
+};
+
+type InventoryRoomSnapshot = {
+  id: string;
+  nombre: string;
+  piso: number | null;
+  capacidad: number | null;
+};
+
+type InventoryItemSnapshot = {
+  id: string;
+  nombre: string;
+  codigo: string;
+  salon: string;
+  estado: string;
+  grupo: string;
+};
+
+export type ReservationRequestRow = {
+  id: string;
+  resourceType: ReservationResourceType;
+  resourceId: string;
+  resourceLabel: string;
+  resourceContext: string | null;
+  resourceCode: string | null;
+  resourceDescription: string | null;
+  resourceOriginalRoomId: string | null;
+  resourceOriginalRoomLabel: string | null;
+  destinationRoomId: string | null;
+  destinationRoomLabel: string | null;
+  bookingDate: string;
+  startTime: string;
+  endTime: string;
+  purpose: string;
+  requesterName: string;
+  requesterDocument: string;
+  requesterEmail: string | null;
+  requesterPhone: string | null;
+  status: ReservationStatus;
+  confirmationToken: string | null;
+  createdByStaffId: string;
+  returnedAt: string | null;
+  createdAt: string;
+  updatedAt: string;
+};
+
+let ensureReservationsSchemaPromise: Promise<void> | null = null;
+
+const generateConfirmationToken = (): string => {
+  return randomBytes(32).toString("hex");
+};
+
+const ensureReservationsSchema = async () => {
+  // Add confirmation_token column if it doesn't exist
+  await prisma.$executeRawUnsafe(`
+    ALTER TABLE IF EXISTS public.reservas_solicitudes
+    ADD COLUMN IF NOT EXISTS confirmation_token text
+  `);
+
+  // Update status enum constraint to include new values
+  await prisma.$executeRawUnsafe(`
+    ALTER TABLE IF EXISTS public.reservas_solicitudes
+    DROP CONSTRAINT IF EXISTS reservas_solicitudes_status_chk
+  `);
+
+  await prisma.$executeRawUnsafe(`
+    ALTER TABLE IF EXISTS public.reservas_solicitudes
+    ADD CONSTRAINT reservas_solicitudes_status_chk CHECK (status IN ('no_aceptado', 'confirmada', 'devuelto', 'rechazada', 'cancelada', 'reportado'))
+  `);
+
+  // Create the table if it doesn't exist
+  await prisma.$executeRawUnsafe(`
+    CREATE TABLE IF NOT EXISTS public.reservas_solicitudes (
+      id uuid PRIMARY KEY DEFAULT gen_random_uuid(),
+      resource_type text NOT NULL,
+      resource_id text NOT NULL,
+      resource_label text NOT NULL,
+      resource_context text,
+      resource_code text,
+      resource_description text,
+      resource_original_room_id text,
+      resource_original_room_label text,
+      destination_room_id text,
+      destination_room_label text,
+      booking_date date NOT NULL,
+      start_time time NOT NULL,
+      end_time time NOT NULL,
+      purpose text NOT NULL,
+      requester_name text NOT NULL,
+      requester_document text NOT NULL,
+      requester_email text,
+      requester_phone text,
+      status text NOT NULL DEFAULT 'no_aceptado',
+      confirmation_token text,
+      created_by_staff_id uuid NOT NULL REFERENCES public.staff(id),
+      returned_at timestamptz,
+      created_at timestamptz NOT NULL DEFAULT now(),
+      updated_at timestamptz NOT NULL DEFAULT now(),
+      CONSTRAINT reservas_solicitudes_resource_type_chk CHECK (resource_type IN ('rooms', 'equipment')),
+      CONSTRAINT reservas_solicitudes_status_chk CHECK (status IN ('no_aceptado', 'confirmada', 'devuelto', 'rechazada', 'cancelada')),
+      CONSTRAINT reservas_solicitudes_time_chk CHECK (end_time > start_time),
+      CONSTRAINT reservas_solicitudes_destination_chk CHECK (
+        (resource_type = 'rooms' AND destination_room_id IS NULL AND destination_room_label IS NULL)
+        OR
+        (resource_type = 'equipment' AND destination_room_id IS NOT NULL AND destination_room_label IS NOT NULL)
+      )
+    )
+  `);
+
+  await prisma.$executeRawUnsafe(`
+    ALTER TABLE IF EXISTS public.reservas_solicitudes
+    ADD COLUMN IF NOT EXISTS resource_original_room_id text
+  `);
+
+  await prisma.$executeRawUnsafe(`
+    ALTER TABLE IF EXISTS public.reservas_solicitudes
+    ADD COLUMN IF NOT EXISTS resource_original_room_label text
+  `);
+
+  await prisma.$executeRawUnsafe(`
+    ALTER TABLE IF EXISTS public.reservas_solicitudes
+    ADD COLUMN IF NOT EXISTS returned_at timestamptz
+  `);
+
+  // Create indexes
+  await prisma.$executeRawUnsafe(`
+    CREATE INDEX IF NOT EXISTS idx_reservas_solicitudes_resource_type ON public.reservas_solicitudes(resource_type)
+  `);
+
+  await prisma.$executeRawUnsafe(`
+    CREATE INDEX IF NOT EXISTS idx_reservas_solicitudes_booking_date ON public.reservas_solicitudes(booking_date)
+  `);
+
+  await prisma.$executeRawUnsafe(`
+    CREATE INDEX IF NOT EXISTS idx_reservas_solicitudes_status ON public.reservas_solicitudes(status)
+  `);
+
+  await prisma.$executeRawUnsafe(`
+    CREATE INDEX IF NOT EXISTS idx_reservas_solicitudes_created_by ON public.reservas_solicitudes(created_by_staff_id)
+  `);
+
+  await prisma.$executeRawUnsafe(`
+    CREATE INDEX IF NOT EXISTS idx_reservas_solicitudes_confirmation_token ON public.reservas_solicitudes(confirmation_token)
+  `);
+};
+
+export const ensureReservationsSchemaReady = async () => {
+  if (!ensureReservationsSchemaPromise) {
+    ensureReservationsSchemaPromise = ensureReservationsSchema().catch((error) => {
+      ensureReservationsSchemaPromise = null;
+      throw error;
+    });
+  }
+
+  await ensureReservationsSchemaPromise;
+};
+
+const toIsoDate = (value: Date) => value.toISOString().slice(0, 10);
+
+const getRoomByIdentifier = async (identifier: string) => {
+  const rows = await prisma.$queryRaw<InventoryRoomSnapshot[]>`
+    SELECT
+      id::text AS id,
+      nombre_bloque AS nombre,
+      piso,
+      capacidad
+    FROM public.salones
+    WHERE id::text = ${identifier} OR nombre_bloque = ${identifier}
+    LIMIT 1
+  `;
+
+  return rows[0] ?? null;
+};
+
+const getInventoryItemById = async (identifier: string) => {
+  const rows = await prisma.$queryRaw<InventoryItemSnapshot[]>`
+    SELECT
+      i.id::text AS id,
+      i.nombre,
+      i.codigo,
+      i.salon,
+      i.estado,
+      g.nombre AS grupo
+    FROM public.inventory_items i
+    INNER JOIN public.inventory_groups g ON g.id = i.group_id
+    WHERE i.id::text = ${identifier}
+    LIMIT 1
+  `;
+
+  return rows[0] ?? null;
+};
+
+const updateInventoryItemRoom = async (db: any, itemId: string, room: string) => {
+  await db.$queryRaw`
+    UPDATE public.inventory_items
+    SET salon = ${room}, updated_at = now()
+    WHERE id = ${itemId}::uuid
+  `;
+};
+
+export const createReservationRequest = async (payload: CreateReservationInput) => {
+  await ensureReservationsSchemaReady();
+
+  const destinationRoom = payload.destinationRoomId ? await getRoomByIdentifier(payload.destinationRoomId) : null;
+  const confirmationToken = generateConfirmationToken();
+
+  if (payload.resourceType === "rooms") {
+    const room = await getRoomByIdentifier(payload.resourceId);
+    if (!room) {
+      throw new Error("No se encontro el salon seleccionado");
+    }
+
+    const rows = await prisma.$queryRaw<Array<{ id: string }>>`
+      INSERT INTO public.reservas_solicitudes (
+        resource_type,
+        resource_id,
+        resource_label,
+        resource_context,
+        resource_code,
+        resource_description,
+        destination_room_id,
+        destination_room_label,
+        booking_date,
+        start_time,
+        end_time,
+        purpose,
+        requester_name,
+        requester_document,
+        requester_email,
+        requester_phone,
+        status,
+        confirmation_token,
+        created_by_staff_id
+      )
+      VALUES (
+        'rooms',
+        ${room.id},
+        ${room.nombre},
+        ${room.piso !== null ? `Piso ${room.piso}` : null},
+        ${null},
+        ${room.capacidad !== null ? `Capacidad ${room.capacidad}` : null},
+        ${null},
+        ${null},
+        ${toIsoDate(payload.bookingDate)},
+        ${payload.startTime},
+        ${payload.endTime},
+        ${payload.purpose},
+        ${payload.requesterName},
+        ${payload.requesterDocument},
+        ${payload.requesterEmail},
+        ${payload.requesterPhone},
+        'no_aceptado',
+        ${confirmationToken},
+        ${payload.createdByStaffId}::uuid
+      )
+      RETURNING id::text AS id
+    `;
+
+    const id = rows[0]?.id;
+    if (!id) {
+      throw new Error("No se pudo crear la solicitud de reserva");
+    }
+
+    // Send confirmation email if email is provided
+    if (payload.requesterEmail) {
+      const emailData: ReservationEmailData = {
+        id,
+        requesterName: payload.requesterName,
+        requesterEmail: payload.requesterEmail,
+        resourceLabel: room.nombre,
+        resourceType: "rooms",
+        bookingDate: toIsoDate(payload.bookingDate),
+        startTime: payload.startTime,
+        endTime: payload.endTime,
+        purpose: payload.purpose,
+        confirmationToken,
+      };
+
+      // Send email asynchronously without blocking the response
+      sendReservationConfirmationEmail(emailData).catch((error) => {
+        console.error(`Failed to send email for reservation ${id}:`, error);
+      });
+    }
+
+    return { id };
+  }
+
+  // Equipment reservation
+  const item = await getInventoryItemById(payload.resourceId);
+  if (!item) {
+    throw new Error("No se encontro el elemento de inventario seleccionado");
+  }
+
+  if ((item.estado ?? "").toLowerCase() !== "disponible") {
+    throw new Error("El elemento seleccionado no esta disponible");
+  }
+
+  if (!destinationRoom) {
+    throw new Error("Debes seleccionar el salon de destino");
+  }
+
+  const originalRoomLabel = item.salon;
+
+  return prisma.$transaction(async (tx) => {
+    // Update inventory item location
+    await updateInventoryItemRoom(tx, item.id, destinationRoom.nombre);
+
+    // Create reservation
+    const rows = await tx.$queryRaw<Array<{ id: string }>>`
+      INSERT INTO public.reservas_solicitudes (
+        resource_type,
+        resource_id,
+        resource_label,
+        resource_context,
+        resource_code,
+        resource_description,
+        resource_original_room_id,
+        resource_original_room_label,
+        destination_room_id,
+        destination_room_label,
+        booking_date,
+        start_time,
+        end_time,
+        purpose,
+        requester_name,
+        requester_document,
+        requester_email,
+        requester_phone,
+        status,
+        confirmation_token,
+        created_by_staff_id
+      )
+      VALUES (
+        'equipment',
+        ${item.id},
+        ${item.nombre},
+        ${item.grupo},
+        ${item.codigo},
+        ${item.salon},
+        ${null},
+        ${originalRoomLabel},
+        ${destinationRoom.id},
+        ${destinationRoom.nombre},
+        ${toIsoDate(payload.bookingDate)},
+        ${payload.startTime},
+        ${payload.endTime},
+        ${payload.purpose},
+        ${payload.requesterName},
+        ${payload.requesterDocument},
+        ${payload.requesterEmail},
+        ${payload.requesterPhone},
+        'no_aceptado',
+        ${confirmationToken},
+        ${payload.createdByStaffId}::uuid
+      )
+      RETURNING id::text AS id
+    `;
+
+    const id = rows[0]?.id;
+    if (!id) {
+      throw new Error("No se pudo crear la solicitud de reserva");
+    }
+
+    // Send confirmation email if email is provided
+    if (payload.requesterEmail) {
+      const emailData: ReservationEmailData = {
+        id,
+        requesterName: payload.requesterName,
+        requesterEmail: payload.requesterEmail,
+        resourceLabel: item.nombre,
+        resourceType: "equipment",
+        bookingDate: toIsoDate(payload.bookingDate),
+        startTime: payload.startTime,
+        endTime: payload.endTime,
+        purpose: payload.purpose,
+        destinationRoom: destinationRoom.nombre,
+        confirmationToken,
+      };
+
+      // Send email asynchronously without blocking the response
+      sendReservationConfirmationEmail(emailData).catch((error) => {
+        console.error(`Failed to send email for reservation ${id}:`, error);
+      });
+    }
+
+    return { id };
+  });
+};
+
+export const getReservationRequestById = async (id: string) => {
+  await ensureReservationsSchemaReady();
+
+  const rows = await prisma.$queryRaw<ReservationRequestRow[]>`
+    SELECT
+      id::text AS id,
+      resource_type AS "resourceType",
+      resource_id AS "resourceId",
+      resource_label AS "resourceLabel",
+      resource_context AS "resourceContext",
+      resource_code AS "resourceCode",
+      resource_description AS "resourceDescription",
+      resource_original_room_id AS "resourceOriginalRoomId",
+      resource_original_room_label AS "resourceOriginalRoomLabel",
+      destination_room_id AS "destinationRoomId",
+      destination_room_label AS "destinationRoomLabel",
+      TO_CHAR(booking_date, 'YYYY-MM-DD') AS "bookingDate",
+      TO_CHAR(start_time, 'HH24:MI') AS "startTime",
+      TO_CHAR(end_time, 'HH24:MI') AS "endTime",
+      purpose,
+      requester_name AS "requesterName",
+      requester_document AS "requesterDocument",
+      requester_email AS "requesterEmail",
+      requester_phone AS "requesterPhone",
+      status,
+      confirmation_token AS "confirmationToken",
+      created_by_staff_id::text AS "createdByStaffId",
+      TO_CHAR(returned_at, 'YYYY-MM-DD"T"HH24:MI:SS.MS"Z"') AS "returnedAt",
+      TO_CHAR(created_at, 'YYYY-MM-DD"T"HH24:MI:SS.MS"Z"') AS "createdAt",
+      TO_CHAR(updated_at, 'YYYY-MM-DD"T"HH24:MI:SS.MS"Z"') AS "updatedAt"
+    FROM public.reservas_solicitudes
+    WHERE id::text = ${id}
+  `;
+
+  return rows[0] ?? null;
+};
+
+export const confirmReservationRequest = async (reservationId: string, token: string) => {
+  await ensureReservationsSchemaReady();
+
+  const reservation = await getReservationRequestById(reservationId);
+  if (!reservation) {
+    throw new Error("No se encontro la solicitud de reserva");
+  }
+
+  if (reservation.confirmationToken !== token) {
+    throw new Error("Token de confirmacion invalido");
+  }
+
+  // Check if token has expired (24 hours)
+  const now = new Date();
+  const expiryDate = new Date(reservation.confirmationTokenExpiresAt || 0);
+  if (now > expiryDate) {
+    throw new Error("El enlace de confirmación ha expirado. Por favor, solicita un nuevo enlace.");
+  }
+
+  if (reservation.status === "confirmada") {
+    throw new Error("La solicitud ya fue confirmada");
+  }
+
+  const updated = await prisma.$queryRaw<Array<{ id: string }>>`
+    UPDATE public.reservas_solicitudes
+    SET status = 'confirmada', updated_at = now()
+    WHERE id = ${reservationId}::uuid
+    RETURNING id::text AS id
+  `;
+
+  const updatedId = updated[0]?.id;
+  if (!updatedId) {
+    throw new Error("No se pudo confirmar la solicitud de reserva");
+  }
+
+  return { id: updatedId };
+};
+
+export const returnReservationRequest = async (reservationId: string) => {
+  await ensureReservationsSchemaReady();
+
+  const reservation = await getReservationRequestById(reservationId);
+  if (!reservation) {
+    throw new Error("No se encontro la solicitud de reserva");
+  }
+
+  if (reservation.resourceType !== "equipment") {
+    throw new Error("Solo los elementos de inventario pueden devolverse");
+  }
+
+  if (reservation.status === "devuelto") {
+    throw new Error("La solicitud ya fue devuelta");
+  }
+
+  if (!reservation.resourceOriginalRoomLabel) {
+    throw new Error("No se pudo recuperar la ubicacion original del elemento");
+  }
+
+  return prisma.$transaction(async (tx) => {
+    // Restore inventory item location
+    await tx.$queryRaw`
+      UPDATE public.inventory_items
+      SET salon = ${reservation.resourceOriginalRoomLabel}, updated_at = now()
+      WHERE id = ${reservation.resourceId}::uuid
+    `;
+
+    // Update reservation status
+    const updated = await tx.$queryRaw<Array<{ id: string }>>`
+      UPDATE public.reservas_solicitudes
+      SET status = 'devuelto', returned_at = now(), updated_at = now()
+      WHERE id = ${reservationId}::uuid
+      RETURNING id::text AS id
+    `;
+
+    const updatedId = updated[0]?.id;
+    if (!updatedId) {
+      throw new Error("No se pudo marcar la solicitud como devuelta");
+    }
+
+    return { id: updatedId };
+  });
+};
+
+export const listReservationRequests = async () => {
+  await ensureReservationsSchemaReady();
+
+  const rows = await prisma.$queryRaw<ReservationRequestRow[]>`
+    SELECT
+      id::text AS id,
+      resource_type AS "resourceType",
+      resource_id AS "resourceId",
+      resource_label AS "resourceLabel",
+      resource_context AS "resourceContext",
+      resource_code AS "resourceCode",
+      resource_description AS "resourceDescription",
+      resource_original_room_id AS "resourceOriginalRoomId",
+      resource_original_room_label AS "resourceOriginalRoomLabel",
+      destination_room_id AS "destinationRoomId",
+      destination_room_label AS "destinationRoomLabel",
+      TO_CHAR(booking_date, 'YYYY-MM-DD') AS "bookingDate",
+      TO_CHAR(start_time, 'HH24:MI') AS "startTime",
+      TO_CHAR(end_time, 'HH24:MI') AS "endTime",
+      purpose,
+      requester_name AS "requesterName",
+      requester_document AS "requesterDocument",
+      requester_email AS "requesterEmail",
+      requester_phone AS "requesterPhone",
+      status,
+      confirmation_token AS "confirmationToken",
+      created_by_staff_id::text AS "createdByStaffId",
+      TO_CHAR(returned_at, 'YYYY-MM-DD"T"HH24:MI:SS.MS"Z"') AS "returnedAt",
+      TO_CHAR(created_at, 'YYYY-MM-DD"T"HH24:MI:SS.MS"Z"') AS "createdAt",
+      TO_CHAR(updated_at, 'YYYY-MM-DD"T"HH24:MI:SS.MS"Z"') AS "updatedAt"
+    FROM public.reservas_solicitudes
+    ORDER BY created_at DESC
+  `;
+
+  return rows;
+};
+
+export const cancelReservationRequest = async (reservationId: string, requesterStaffId: string, allowAdmin = false) => {
+  await ensureReservationsSchemaReady();
+
+  const reservation = await getReservationRequestById(reservationId);
+  if (!reservation) {
+    throw new Error("No se encontro la solicitud de reserva");
+  }
+
+  if (reservation.status !== "no_aceptado") {
+    throw new Error("Sólo se pueden cancelar solicitudes que aún no fueron aceptadas");
+  }
+
+  if (!allowAdmin && reservation.createdByStaffId !== requesterStaffId) {
+    throw new Error("No autorizado para cancelar esta solicitud");
+  }
+
+  const updated = await prisma.$queryRaw<Array<{ id: string }>>`
+    UPDATE public.reservas_solicitudes
+    SET status = 'cancelada', updated_at = now()
+    WHERE id = ${reservationId}::uuid
+    RETURNING id::text AS id
+  `;
+
+  const updatedId = updated[0]?.id;
+  if (!updatedId) {
+    throw new Error("No se pudo cancelar la solicitud de reserva");
+  }
+
+  return { id: updatedId };
+};
+
+export const closeReservationRequest = async (reservationId: string, requesterStaffId: string, allowAdmin = false) => {
+  await ensureReservationsSchemaReady();
+
+  const reservation = await getReservationRequestById(reservationId);
+  if (!reservation) {
+    throw new Error("No se encontro la solicitud de reserva");
+  }
+
+  if (reservation.status !== "confirmada") {
+    throw new Error("Sólo se pueden cerrar solicitudes que estén confirmadas");
+  }
+
+  if (!allowAdmin && reservation.createdByStaffId !== requesterStaffId) {
+    throw new Error("No autorizado para cerrar esta solicitud");
+  }
+
+  // For equipment, perform the return workflow which restores inventory and marks as devuelto
+  if (reservation.resourceType === "equipment") {
+    return await returnReservationRequest(reservationId);
+  }
+
+  // For rooms, mark as devuelto (closed)
+  const updated = await prisma.$queryRaw<Array<{ id: string }>>`
+    UPDATE public.reservas_solicitudes
+    SET status = 'devuelto', updated_at = now()
+    WHERE id = ${reservationId}::uuid
+    RETURNING id::text AS id
+  `;
+
+  const updatedId = updated[0]?.id;
+  if (!updatedId) {
+    throw new Error("No se pudo cerrar la solicitud de reserva");
+  }
+
+  return { id: updatedId };
+};
+
+export const reportReservationRequest = async (reservationId: string, requesterStaffId: string, allowAdmin = false) => {
+  await ensureReservationsSchemaReady();
+
+  const reservation = await getReservationRequestById(reservationId);
+  if (!reservation) {
+    throw new Error("No se encontro la solicitud de reserva");
+  }
+
+  if (reservation.status !== "confirmada") {
+    throw new Error("Sólo se pueden reportar solicitudes que estén confirmadas");
+  }
+
+  if (!allowAdmin && reservation.createdByStaffId !== requesterStaffId) {
+    throw new Error("No autorizado para reportar esta solicitud");
+  }
+
+  // For equipment, still attempt to restore original location, but mark as reported
+  if (reservation.resourceType === "equipment") {
+    return prisma.$transaction(async (tx) => {
+      if (!reservation.resourceOriginalRoomLabel) {
+        throw new Error("No se pudo recuperar la ubicacion original del elemento");
+      }
+
+      await tx.$queryRaw`
+        UPDATE public.inventory_items
+        SET salon = ${reservation.resourceOriginalRoomLabel}, updated_at = now()
+        WHERE id = ${reservation.resourceId}::uuid
+      `;
+
+      const updated = await tx.$queryRaw<Array<{ id: string }>>`
+        UPDATE public.reservas_solicitudes
+        SET status = 'reportado', returned_at = now(), updated_at = now()
+        WHERE id = ${reservationId}::uuid
+        RETURNING id::text AS id
+      `;
+
+      const updatedId = updated[0]?.id;
+      if (!updatedId) {
+        throw new Error("No se pudo marcar la solicitud como reportada");
+      }
+
+      return { id: updatedId };
+    });
+  }
+
+  // For rooms, just mark as reportado
+  const updated = await prisma.$queryRaw<Array<{ id: string }>>`
+    UPDATE public.reservas_solicitudes
+    SET status = 'reportado', updated_at = now()
+    WHERE id = ${reservationId}::uuid
+    RETURNING id::text AS id
+  `;
+
+  const updatedId = updated[0]?.id;
+  if (!updatedId) {
+    throw new Error("No se pudo marcar la solicitud como reportada");
+  }
+
+  return { id: updatedId };
+};
+
+export const listReservationRequestsByCreator = async (staffId: string) => {
+  await ensureReservationsSchemaReady();
+
+  const rows = await prisma.$queryRaw<ReservationRequestRow[]>`
+    SELECT
+      id::text AS id,
+      resource_type AS "resourceType",
+      resource_id AS "resourceId",
+      resource_label AS "resourceLabel",
+      resource_context AS "resourceContext",
+      resource_code AS "resourceCode",
+      resource_description AS "resourceDescription",
+      resource_original_room_id AS "resourceOriginalRoomId",
+      resource_original_room_label AS "resourceOriginalRoomLabel",
+      destination_room_id AS "destinationRoomId",
+      destination_room_label AS "destinationRoomLabel",
+      TO_CHAR(booking_date, 'YYYY-MM-DD') AS "bookingDate",
+      TO_CHAR(start_time, 'HH24:MI') AS "startTime",
+      TO_CHAR(end_time, 'HH24:MI') AS "endTime",
+      purpose,
+      requester_name AS "requesterName",
+      requester_document AS "requesterDocument",
+      requester_email AS "requesterEmail",
+      requester_phone AS "requesterPhone",
+      status,
+      confirmation_token AS "confirmationToken",
+      created_by_staff_id::text AS "createdByStaffId",
+      TO_CHAR(returned_at, 'YYYY-MM-DD"T"HH24:MI:SS.MS"Z"') AS "returnedAt",
+      TO_CHAR(created_at, 'YYYY-MM-DD"T"HH24:MI:SS.MS"Z"') AS "createdAt",
+      TO_CHAR(updated_at, 'YYYY-MM-DD"T"HH24:MI:SS.MS"Z"') AS "updatedAt"
+    FROM public.reservas_solicitudes
+    WHERE created_by_staff_id::text = ${staffId}
+    ORDER BY created_at DESC
+  `;
+
+  return rows;
+};
