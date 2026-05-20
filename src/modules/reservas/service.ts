@@ -475,7 +475,7 @@ export const confirmReservationRequest = async (reservationId: string, token: st
   }
 
   if (reservation.status === "confirmada") {
-    throw new Error("La solicitud ya fue confirmada");
+    return { id: reservation.id, alreadyConfirmed: true };
   }
 
   const updated = await prisma.$queryRaw<Array<{ id: string }>>`
@@ -490,7 +490,7 @@ export const confirmReservationRequest = async (reservationId: string, token: st
     throw new Error("No se pudo confirmar la solicitud de reserva");
   }
 
-  return { id: updatedId };
+  return { id: updatedId, alreadyConfirmed: false };
 };
 
 export const returnReservationRequest = async (reservationId: string) => {

@@ -310,7 +310,7 @@ reservasRouter.get("/:reservationId/confirm", async (req, res, next) => {
       return res.json({ debug: true, reservationId, token: token as string, db: row });
     }
 
-    const confirmed = await confirmReservationRequest(reservationId, token as string);
+    const confirmationResult = await confirmReservationRequest(reservationId, token as string);
     const reservation = await getReservationRequestById(reservationId);
 
     if (!reservation) {
@@ -324,7 +324,8 @@ reservasRouter.get("/:reservationId/confirm", async (req, res, next) => {
 
     if (wantsJson) {
       return res.json({
-        message: "Reserva confirmada",
+        message: confirmationResult.alreadyConfirmed ? "Esta solicitud ya estaba confirmada." : "Reserva confirmada",
+        alreadyConfirmed: confirmationResult.alreadyConfirmed,
         reservation: {
           id: reservation.id,
           resourceLabel: reservation.resourceLabel,
