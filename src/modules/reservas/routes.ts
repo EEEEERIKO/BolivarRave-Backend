@@ -272,7 +272,7 @@ reservasRouter.patch("/:reservationId/report", requireAuthToken, async (req, res
     if (!authUser?.staffId) return res.status(401).json({ error: "No autorizado" });
 
     const isAdminOrMonitor = authUser.role === "admin" || authUser.role === "monitor";
-    const reported = await reportReservationRequest(reservationId, authUser.staffId, isAdminOrMonitor);
+    const reported = await reportReservationRequest(reservationId, authUser.staffId, isAdminOrMonitor, reportReason ?? null);
 
     if (reportReason) {
       console.warn(`[Reservas] Reporte de reserva ${reservationId}: ${reportReason}`);

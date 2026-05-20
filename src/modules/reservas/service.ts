@@ -62,6 +62,7 @@ export type ReservationRequestRow = {
   confirmationTokenExpiresAt: string | null;
   createdByStaffId: string;
   returnedAt: string | null;
+  reportReason?: string | null;
   createdAt: string;
   updatedAt: string;
 };
@@ -142,6 +143,11 @@ const ensureReservationsSchema = async () => {
   await prisma.$executeRawUnsafe(`
     ALTER TABLE IF EXISTS public.reservas_solicitudes
     ADD COLUMN IF NOT EXISTS returned_at timestamptz
+  `);
+
+  await prisma.$executeRawUnsafe(`
+    ALTER TABLE IF EXISTS public.reservas_solicitudes
+    ADD COLUMN IF NOT EXISTS report_reason text
   `);
 
   // Create indexes
@@ -438,6 +444,7 @@ export const getReservationRequestById = async (id: string) => {
       requester_email AS "requesterEmail",
       requester_phone AS "requesterPhone",
       status,
+      report_reason AS "reportReason",
       confirmation_token AS "confirmationToken",
       created_by_staff_id::text AS "createdByStaffId",
       TO_CHAR(returned_at, 'YYYY-MM-DD"T"HH24:MI:SS.MS"Z"') AS "returnedAt",
@@ -563,6 +570,7 @@ export const listReservationRequests = async () => {
       requester_email AS "requesterEmail",
       requester_phone AS "requesterPhone",
       status,
+      report_reason AS "reportReason",
       confirmation_token AS "confirmationToken",
       created_by_staff_id::text AS "createdByStaffId",
       TO_CHAR(returned_at, 'YYYY-MM-DD"T"HH24:MI:SS.MS"Z"') AS "returnedAt",
@@ -643,7 +651,7 @@ export const closeReservationRequest = async (reservationId: string, requesterSt
   return { id: updatedId };
 };
 
-export const reportReservationRequest = async (reservationId: string, requesterStaffId: string, allowAdmin = false) => {
+export const reportReservationRequest = async (reservationId: string, requesterStaffId: string, allowAdmin = false, reportReason: string | null = null) => {
   await ensureReservationsSchemaReady();
 
   const reservation = await getReservationRequestById(reservationId);
@@ -674,7 +682,7 @@ export const reportReservationRequest = async (reservationId: string, requesterS
 
       const updated = await tx.$queryRaw<Array<{ id: string }>>`
         UPDATE public.reservas_solicitudes
-        SET status = 'reportado', returned_at = now(), updated_at = now()
+        SET status = 'reportado', returned_at = now(), updated_at = now(), report_reason = ${reportReason}
         WHERE id = ${reservationId}::uuid
         RETURNING id::text AS id
       `;
@@ -691,7 +699,7 @@ export const reportReservationRequest = async (reservationId: string, requesterS
   // For rooms, just mark as reportado
   const updated = await prisma.$queryRaw<Array<{ id: string }>>`
     UPDATE public.reservas_solicitudes
-    SET status = 'reportado', updated_at = now()
+    SET status = 'reportado', updated_at = now(), report_reason = ${reportReason}
     WHERE id = ${reservationId}::uuid
     RETURNING id::text AS id
   `;
@@ -729,6 +737,7 @@ export const listReservationRequestsByCreator = async (staffId: string) => {
       requester_email AS "requesterEmail",
       requester_phone AS "requesterPhone",
       status,
+      report_reason AS "reportReason",
       confirmation_token AS "confirmationToken",
       created_by_staff_id::text AS "createdByStaffId",
       TO_CHAR(returned_at, 'YYYY-MM-DD"T"HH24:MI:SS.MS"Z"') AS "returnedAt",

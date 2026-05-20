@@ -50,6 +50,9 @@ const itemBodySchema = z.object({
   motivo: z.string().trim().max(500).nullable().optional(),
   order: z.number().int().min(0).optional(),
   price: z.number().nonnegative().optional(),
+  hdmiAssigned: z.boolean().optional(),
+  hdmiItemId: z.string().uuid().nullable().optional(),
+  alsoMoveHdmi: z.boolean().optional(),
 });
 
 const idParamsSchema = z.object({
@@ -184,6 +187,8 @@ inventoryRouter.post("/items", requireAdminOrMonitorRole, async (req, res, next)
       status: parsed.status,
       defective: parsed.defective,
       motivo: parsed.motivo ?? null,
+      hdmiAssigned: parsed.hdmiAssigned ?? undefined,
+      hdmiItemId: parsed.hdmiItemId ?? undefined,
       ...(parsed.order !== undefined ? { order: parsed.order } : {}),
       ...(parsed.price !== undefined ? { price: parsed.price } : {}),
     });
@@ -235,6 +240,9 @@ inventoryRouter.put("/items/:id", requireAdminOrMonitorRole, async (req, res, ne
       status: parsed.status,
       defective: parsed.defective,
       motivo: parsed.motivo ?? null,
+      hdmiAssigned: parsed.hdmiAssigned ?? undefined,
+      hdmiItemId: parsed.hdmiItemId ?? undefined,
+      alsoMoveHdmi: parsed.alsoMoveHdmi ?? undefined,
       ...(parsed.order !== undefined ? { order: parsed.order } : {}),
       ...(parsed.price !== undefined ? { price: parsed.price } : {}),
     });
