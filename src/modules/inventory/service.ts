@@ -1,6 +1,7 @@
+import type { Prisma } from "@prisma/client";
 import { prisma } from "../../lib/prisma";
 
-export type InventoryItemStatus = "Disponible" | "Fijo";
+export type InventoryItemStatus = "Disponible" | "Fijo" | "Asignado";
 
 const DEFAULT_GROUPS: Array<{ name: string; icon: string; order: number }> = [
   { name: "Televisores", icon: "tv", order: 0 },
@@ -77,6 +78,16 @@ const ensureInventorySchema = async () => {
 
   await prisma.$executeRaw`
     ALTER TABLE public.inventory_items
+    DROP CONSTRAINT IF EXISTS inventory_items_estado_chk
+  `;
+
+  await prisma.$executeRaw`
+    ALTER TABLE public.inventory_items
+    ADD CONSTRAINT inventory_items_estado_chk CHECK (estado IN ('Disponible', 'Fijo', 'Asignado'))
+  `;
+
+  await prisma.$executeRaw`
+    ALTER TABLE public.inventory_items
     ADD COLUMN IF NOT EXISTS motivo text
   `;
 
@@ -93,6 +104,25 @@ const ensureInventorySchema = async () => {
   await prisma.$executeRaw`
     ALTER TABLE public.inventory_items
     ADD COLUMN IF NOT EXISTS hdmi_item_id uuid NULL
+  `;
+
+  await prisma.$executeRaw`
+    UPDATE public.inventory_items AS item
+    SET estado = CASE
+      WHEN EXISTS (
+        SELECT 1
+        FROM public.inventory_items AS linked
+        WHERE linked.hdmi_item_id = item.id
+      ) THEN 'Asignado'
+      ELSE 'Disponible'
+    END,
+    updated_at = now()
+    WHERE EXISTS (
+      SELECT 1
+      FROM public.inventory_groups AS group_item
+      WHERE group_item.id = item.group_id
+      AND lower(group_item.nombre) = 'cables hdmi'
+    )
   `;
 
   await prisma.$executeRaw`
@@ -325,8 +355,9 @@ const getNextItemOrder = async (groupId: string) => {
 };
 
 const assertGroupExists = async (groupId: string) => {
-  const rows = await prisma.$queryRaw<Array<{ id: string }>>`
+  const rows = await prisma.$queryRaw<Array<{ id: string; name: string }>>`
     SELECT id::text AS id
+    , nombre AS name
     FROM public.inventory_groups
     WHERE id = ${groupId}::uuid
     LIMIT 1
@@ -335,6 +366,27 @@ const assertGroupExists = async (groupId: string) => {
   if (!rows[0]?.id) {
     throw new Error("No se encontro el grupo de inventario");
   }
+
+  return rows[0].name;
+};
+
+const isHdmiGroupName = (groupName: string) => groupName.trim().toLowerCase() === "cables hdmi";
+
+const syncHdmiItemStatus = async (tx: Prisma.TransactionClient, hdmiItemId: string) => {
+  const linkedRows = await tx.$queryRaw<Array<{ linkedCount: number }>>`
+    SELECT COUNT(*)::int AS "linkedCount"
+    FROM public.inventory_items
+    WHERE hdmi_item_id = ${hdmiItemId}::uuid
+  `;
+
+  const linkedCount = linkedRows[0]?.linkedCount ?? 0;
+
+  await tx.$executeRaw`
+    UPDATE public.inventory_items
+    SET estado = ${linkedCount > 0 ? "Asignado" : "Disponible"},
+        updated_at = now()
+    WHERE id = ${hdmiItemId}::uuid
+  `;
 };
 
 export const createInventoryGroup = async (payload: { name: string; icon?: string; order?: number }) => {
@@ -429,11 +481,13 @@ export const createInventoryItem = async (payload: {
   price?: number;
   hdmiAssigned?: boolean;
   hdmiItemId?: string | null;
+  alsoMoveHdmi?: boolean;
 }) => {
   await ensureInventorySchemaReady();
-  await assertGroupExists(payload.groupId);
+  const groupName = await assertGroupExists(payload.groupId);
 
-  const rows = await prisma.$queryRaw<Array<{ id: string }>>`
+  const rows = await prisma.$transaction(async (tx) => {
+    const inserted = await tx.$queryRaw<Array<{ id: string }>>`
     INSERT INTO public.inventory_items (group_id, nombre, codigo, salon, estado, defectuoso, hdmi_assigned, hdmi_item_id, precio, motivo, orden)
     VALUES (
       ${payload.groupId}::uuid,
@@ -449,7 +503,29 @@ export const createInventoryItem = async (payload: {
       ${payload.order ?? (await getNextItemOrder(payload.groupId))}
     )
     RETURNING id::text AS id
-  `;
+    `;
+
+    const id = inserted[0]?.id;
+    if (!id) {
+      throw new Error("No se pudo crear el elemento de inventario");
+    }
+
+    if (isHdmiGroupName(groupName)) {
+      await syncHdmiItemStatus(tx, id);
+    }
+
+    if (payload.alsoMoveHdmi && payload.hdmiItemId) {
+      await tx.$queryRaw`
+        UPDATE public.inventory_items
+        SET salon = ${payload.room}, updated_at = now()
+        WHERE id = ${payload.hdmiItemId}::uuid
+      `;
+
+      await syncHdmiItemStatus(tx, payload.hdmiItemId);
+    }
+
+    return inserted;
+  });
 
   const id = rows[0]?.id;
   if (!id) {
@@ -474,8 +550,17 @@ export const updateInventoryItem = async (itemId: string, payload: {
   alsoMoveHdmi?: boolean;
 }) => {
   await ensureInventorySchemaReady();
-  await assertGroupExists(payload.groupId);
+  const groupName = await assertGroupExists(payload.groupId);
   const updatedIdRows = await prisma.$transaction(async (tx) => {
+    const currentRows = await tx.$queryRaw<Array<{ hdmiItemId: string | null }>>`
+      SELECT hdmi_item_id::text AS "hdmiItemId"
+      FROM public.inventory_items
+      WHERE id = ${itemId}::uuid
+      LIMIT 1
+    `;
+
+    const previousHdmiItemId = currentRows[0]?.hdmiItemId ?? null;
+
     const r = await tx.$queryRaw<Array<{ id: string }>>`
       UPDATE public.inventory_items
       SET
@@ -499,18 +584,33 @@ export const updateInventoryItem = async (itemId: string, payload: {
       throw new Error("No se encontro el elemento de inventario");
     }
 
+    if (isHdmiGroupName(groupName)) {
+      await syncHdmiItemStatus(tx, itemId);
+    }
+
+    if (previousHdmiItemId && previousHdmiItemId !== payload.hdmiItemId) {
+      await syncHdmiItemStatus(tx, previousHdmiItemId);
+    }
+
     if (payload.alsoMoveHdmi && payload.hdmiItemId) {
       await tx.$queryRaw`
         UPDATE public.inventory_items
         SET salon = ${payload.room}, updated_at = now()
         WHERE id = ${payload.hdmiItemId}::uuid
       `;
+
+      await syncHdmiItemStatus(tx, payload.hdmiItemId);
     }
 
     return r;
   });
 
-  const updated = await getInventoryItemById(updatedIdRows[0]?.id);
+  const updatedId = updatedIdRows[0]?.id;
+  if (!updatedId) {
+    throw new Error("No se encontro el elemento de inventario");
+  }
+
+  const updated = await getInventoryItemById(updatedId);
   if (!updated) {
     throw new Error("No se encontro el elemento de inventario");
   }

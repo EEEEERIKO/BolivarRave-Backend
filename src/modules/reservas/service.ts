@@ -716,6 +716,22 @@ export const markTelevisionDisplaced = async (reservationId: string) => {
       WHERE id = ${reservation.resourceId}::uuid
     `;
 
+    const televisorRows = await tx.$queryRaw<Array<{ hdmi_item_id: string | null }>>`
+      SELECT hdmi_item_id::text AS hdmi_item_id
+      FROM public.inventory_items
+      WHERE id = ${reservation.resourceId}::uuid
+      LIMIT 1
+    `;
+
+    const linkedHdmiId = televisorRows[0]?.hdmi_item_id;
+    if (linkedHdmiId) {
+      await tx.$queryRaw`
+        UPDATE public.inventory_items
+        SET salon = ${destinationRoomLabel}, updated_at = now()
+        WHERE id = ${linkedHdmiId}::uuid
+      `;
+    }
+
     const rows = await tx.$queryRaw<Array<{ id: string }>>`
       UPDATE public.reservas_solicitudes
       SET status = 'confirmada', updated_at = now()

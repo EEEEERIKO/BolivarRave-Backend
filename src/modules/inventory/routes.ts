@@ -45,7 +45,7 @@ const itemBodySchema = z.object({
   name: z.string().trim().min(2).max(160),
   code: z.string().trim().min(1).max(80),
   room: z.string().trim().min(2).max(160),
-  status: z.enum(["Disponible", "Fijo"]),
+  status: z.enum(["Disponible", "Fijo", "Asignado"]),
   defective: z.boolean().default(false),
   motivo: z.string().trim().max(500).nullable().optional(),
   order: z.number().int().min(0).optional(),
@@ -187,10 +187,11 @@ inventoryRouter.post("/items", requireAdminOrMonitorRole, async (req, res, next)
       status: parsed.status,
       defective: parsed.defective,
       motivo: parsed.motivo ?? null,
-      hdmiAssigned: parsed.hdmiAssigned ?? undefined,
-      hdmiItemId: parsed.hdmiItemId ?? undefined,
       ...(parsed.order !== undefined ? { order: parsed.order } : {}),
       ...(parsed.price !== undefined ? { price: parsed.price } : {}),
+      ...(parsed.hdmiAssigned !== undefined ? { hdmiAssigned: parsed.hdmiAssigned } : {}),
+      ...(parsed.hdmiItemId !== undefined ? { hdmiItemId: parsed.hdmiItemId } : {}),
+      ...(parsed.alsoMoveHdmi !== undefined ? { alsoMoveHdmi: parsed.alsoMoveHdmi } : {}),
     });
 
     return res.status(201).json({ message: "Elemento creado correctamente", id: created.id });
@@ -240,11 +241,11 @@ inventoryRouter.put("/items/:id", requireAdminOrMonitorRole, async (req, res, ne
       status: parsed.status,
       defective: parsed.defective,
       motivo: parsed.motivo ?? null,
-      hdmiAssigned: parsed.hdmiAssigned ?? undefined,
-      hdmiItemId: parsed.hdmiItemId ?? undefined,
-      alsoMoveHdmi: parsed.alsoMoveHdmi ?? undefined,
       ...(parsed.order !== undefined ? { order: parsed.order } : {}),
       ...(parsed.price !== undefined ? { price: parsed.price } : {}),
+      ...(parsed.hdmiAssigned !== undefined ? { hdmiAssigned: parsed.hdmiAssigned } : {}),
+      ...(parsed.hdmiItemId !== undefined ? { hdmiItemId: parsed.hdmiItemId } : {}),
+      ...(parsed.alsoMoveHdmi !== undefined ? { alsoMoveHdmi: parsed.alsoMoveHdmi } : {}),
     });
 
     return res.json({ message: "Elemento actualizado correctamente", id: updated.id });
