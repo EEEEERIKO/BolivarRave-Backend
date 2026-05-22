@@ -2,7 +2,7 @@ import { prisma } from "../../lib/prisma";
 import { sendReservationConfirmationEmail, ReservationEmailData } from "./email";
 import { randomBytes } from "crypto";
 
-export type ReservationResourceType = "rooms" | "equipment";
+export type ReservationResourceType = "rooms" | "equipment" | "televisor";
 export type ReservationStatus = "no_aceptado" | "confirmada" | "devuelto" | "rechazada" | "cancelada" | "reportado";
 
 export type CreateReservationInput = {
@@ -35,6 +35,30 @@ type InventoryItemSnapshot = {
   salon: string;
   estado: string;
   grupo: string;
+};
+
+type TelevisionCandidate = {
+  id: string;
+  nombre: string;
+  codigo: string;
+  salon: string;
+  roomTvCount: number;
+};
+
+type TelevisionSelection = {
+  television: TelevisionCandidate;
+  note: string | null;
+  needsReturnReminder: boolean;
+};
+
+type RoomReservationConflict = {
+  resourceId: string;
+  bookingDate: string;
+  startTime: string;
+  endTime: string;
+  status: string;
+  resourceType: ReservationResourceType;
+  resourceLabel: string;
 };
 
 export type ReservationRequestRow = {
@@ -88,7 +112,31 @@ const ensureReservationsSchema = async () => {
 
   await prisma.$executeRawUnsafe(`
     ALTER TABLE IF EXISTS public.reservas_solicitudes
+    DROP CONSTRAINT IF EXISTS reservas_solicitudes_resource_type_chk
+  `);
+
+  await prisma.$executeRawUnsafe(`
+    ALTER TABLE IF EXISTS public.reservas_solicitudes
+    DROP CONSTRAINT IF EXISTS reservas_solicitudes_destination_chk
+  `);
+
+  await prisma.$executeRawUnsafe(`
+    ALTER TABLE IF EXISTS public.reservas_solicitudes
     ADD CONSTRAINT reservas_solicitudes_status_chk CHECK (status IN ('no_aceptado', 'confirmada', 'devuelto', 'rechazada', 'cancelada', 'reportado'))
+  `);
+
+  await prisma.$executeRawUnsafe(`
+    ALTER TABLE IF EXISTS public.reservas_solicitudes
+    ADD CONSTRAINT reservas_solicitudes_resource_type_chk CHECK (resource_type IN ('rooms', 'equipment', 'televisor'))
+  `);
+
+  await prisma.$executeRawUnsafe(`
+    ALTER TABLE IF EXISTS public.reservas_solicitudes
+    ADD CONSTRAINT reservas_solicitudes_destination_chk CHECK (
+      (resource_type = 'rooms' AND destination_room_id IS NULL AND destination_room_label IS NULL)
+      OR
+      (resource_type IN ('equipment', 'televisor') AND destination_room_id IS NOT NULL AND destination_room_label IS NOT NULL)
+    )
   `);
 
   // Create the table if it doesn't exist
@@ -119,13 +167,13 @@ const ensureReservationsSchema = async () => {
       returned_at timestamptz,
       created_at timestamptz NOT NULL DEFAULT now(),
       updated_at timestamptz NOT NULL DEFAULT now(),
-      CONSTRAINT reservas_solicitudes_resource_type_chk CHECK (resource_type IN ('rooms', 'equipment')),
-      CONSTRAINT reservas_solicitudes_status_chk CHECK (status IN ('no_aceptado', 'confirmada', 'devuelto', 'rechazada', 'cancelada')),
+      CONSTRAINT reservas_solicitudes_resource_type_chk CHECK (resource_type IN ('rooms', 'equipment', 'televisor')),
+      CONSTRAINT reservas_solicitudes_status_chk CHECK (status IN ('no_aceptado', 'confirmada', 'devuelto', 'rechazada', 'cancelada', 'reportado')),
       CONSTRAINT reservas_solicitudes_time_chk CHECK (end_time > start_time),
       CONSTRAINT reservas_solicitudes_destination_chk CHECK (
         (resource_type = 'rooms' AND destination_room_id IS NULL AND destination_room_label IS NULL)
         OR
-        (resource_type = 'equipment' AND destination_room_id IS NOT NULL AND destination_room_label IS NOT NULL)
+        (resource_type IN ('equipment', 'televisor') AND destination_room_id IS NOT NULL AND destination_room_label IS NOT NULL)
       )
     )
   `);
@@ -218,6 +266,187 @@ const getInventoryItemById = async (identifier: string) => {
   return rows[0] ?? null;
 };
 
+const isTelevisionGroup = (groupName: string) => groupName.trim().toLowerCase() === "televisores";
+
+const timeToMinutes = (timeStr: string) => {
+  const [hours = "0", minutes = "0"] = timeStr.split(":");
+  return Number(hours) * 60 + Number(minutes);
+};
+
+const timeRangesOverlap = (aStart: string, aEnd: string, bStart: string, bEnd: string) => {
+  const aStartMin = timeToMinutes(aStart);
+  const aEndMin = timeToMinutes(aEnd);
+  const bStartMin = timeToMinutes(bStart);
+  const bEndMin = timeToMinutes(bEnd);
+  return aStartMin < bEndMin && bStartMin < aEndMin;
+};
+
+const normalizeRoomLabel = (value: string) => value.trim().toLowerCase();
+
+const extractFloorNumber = (value: string) => {
+  const match = value.match(/piso\s*(\d+)/i);
+  return match ? Number(match[1]) : null;
+};
+
+const getRoomDistanceScore = (sourceRoom: string, destinationRoom: string) => {
+  const sourceFloor = extractFloorNumber(sourceRoom);
+  const destinationFloor = extractFloorNumber(destinationRoom);
+
+  if (sourceFloor !== null && destinationFloor !== null) {
+    return Math.abs(sourceFloor - destinationFloor);
+  }
+
+  if (normalizeRoomLabel(sourceRoom) === normalizeRoomLabel(destinationRoom)) {
+    return 0;
+  }
+
+  return sourceRoom === destinationRoom ? 0 : 99;
+};
+
+const getTelevisionCandidates = async (): Promise<TelevisionCandidate[]> => {
+  const rows = await prisma.$queryRaw<TelevisionCandidate[]>`
+    SELECT
+      i.id::text AS id,
+      i.nombre AS nombre,
+      i.codigo AS codigo,
+      i.salon AS salon,
+      COALESCE(room_counts.room_tv_count, 0)::int AS "roomTvCount"
+    FROM public.inventory_items i
+    INNER JOIN public.inventory_groups g ON g.id = i.group_id
+    LEFT JOIN (
+      SELECT
+        salon,
+        COUNT(*)::int AS room_tv_count
+      FROM public.inventory_items tv
+      INNER JOIN public.inventory_groups tg ON tg.id = tv.group_id
+      WHERE LOWER(tg.nombre) = 'televisores'
+        AND COALESCE(tv.defectuoso, false) = false
+      GROUP BY salon
+    ) room_counts ON room_counts.salon = i.salon
+    WHERE LOWER(g.nombre) = 'televisores'
+      AND i.estado = 'Disponible'
+      AND COALESCE(i.defectuoso, false) = false
+    ORDER BY COALESCE(room_counts.room_tv_count, 0) DESC, i.salon ASC, i.orden ASC
+  `;
+
+  return rows;
+};
+
+const getTelevisionRoomConflicts = async (bookingDate: string, startTime: string, endTime: string) => {
+  const rows = await prisma.$queryRaw<RoomReservationConflict[]>`
+    SELECT
+      resource_id::text AS "resourceId",
+      TO_CHAR(booking_date, 'YYYY-MM-DD') AS "bookingDate",
+      TO_CHAR(start_time, 'HH24:MI') AS "startTime",
+      TO_CHAR(end_time, 'HH24:MI') AS "endTime",
+      status,
+      resource_type AS "resourceType",
+      resource_label AS "resourceLabel"
+    FROM public.reservas_solicitudes
+    WHERE booking_date = ${bookingDate}::date
+      AND status IN ('no_aceptado', 'confirmada')
+      AND resource_type IN ('rooms', 'equipment', 'televisor')
+  `;
+
+  return rows.filter((row) => row.resourceType === "rooms" && timeRangesOverlap(row.startTime, row.endTime, startTime, endTime));
+};
+
+const getTelevisionItemConflicts = async (bookingDate: string, startTime: string, endTime: string) => {
+  const rows = await prisma.$queryRaw<RoomReservationConflict[]>`
+    SELECT
+      resource_id::text AS "resourceId",
+      TO_CHAR(booking_date, 'YYYY-MM-DD') AS "bookingDate",
+      TO_CHAR(start_time, 'HH24:MI') AS "startTime",
+      TO_CHAR(end_time, 'HH24:MI') AS "endTime",
+      status,
+      resource_type AS "resourceType",
+      resource_label AS "resourceLabel"
+    FROM public.reservas_solicitudes
+    WHERE booking_date = ${bookingDate}::date
+      AND status IN ('no_aceptado', 'confirmada')
+      AND resource_type IN ('equipment', 'televisor')
+  `;
+
+  return rows.filter((row) => timeRangesOverlap(row.startTime, row.endTime, startTime, endTime));
+};
+
+const selectTelevisionForReservation = async (bookingDate: string, startTime: string, endTime: string, destinationRoomLabel: string) => {
+  const televisions = await getTelevisionCandidates();
+  const reservedTelevisionIds = new Set((await getTelevisionItemConflicts(bookingDate, startTime, endTime)).map((row) => row.resourceId));
+  const roomConflicts = await getTelevisionRoomConflicts(bookingDate, startTime, endTime);
+  const availableTelevisions = televisions.filter((television) => !reservedTelevisionIds.has(television.id));
+  const normalizedDestinationRoom = normalizeRoomLabel(destinationRoomLabel);
+
+  const scored = availableTelevisions
+    .map((television) => {
+      const sameRoom = normalizeRoomLabel(television.salon) === normalizedDestinationRoom;
+      const roomConflict = roomConflicts.some((conflict) => normalizeRoomLabel(conflict.resourceLabel) === normalizeRoomLabel(television.salon));
+      const roomDistanceScore = getRoomDistanceScore(television.salon, destinationRoomLabel);
+
+      return {
+        television,
+        sameRoom,
+        roomConflict,
+        roomDistanceScore,
+      };
+    })
+    .sort((left, right) => {
+      if (left.sameRoom !== right.sameRoom) {
+        return left.sameRoom ? -1 : 1;
+      }
+
+      const leftPriority = left.television.roomTvCount >= 2 ? 0 : 1;
+      const rightPriority = right.television.roomTvCount >= 2 ? 0 : 1;
+      if (leftPriority !== rightPriority) {
+        return leftPriority - rightPriority;
+      }
+
+      if (left.roomConflict !== right.roomConflict) {
+        return left.roomConflict ? 1 : -1;
+      }
+
+      if (left.roomDistanceScore !== right.roomDistanceScore) {
+        return left.roomDistanceScore - right.roomDistanceScore;
+      }
+
+      return left.television.salon.localeCompare(right.television.salon);
+    });
+
+  const bestSameRoom = scored.find((candidate) => candidate.sameRoom);
+  if (bestSameRoom) {
+    return {
+      television: bestSameRoom.television,
+      note: `El televisor ya está en ${destinationRoomLabel}; no requiere traslado.`,
+      needsReturnReminder: false,
+    };
+  }
+
+  const preferred = scored.filter((candidate) => candidate.television.roomTvCount >= 2);
+  if (preferred.length > 0) {
+    const preferredTelevision = preferred[0];
+    if (!preferredTelevision) {
+      return null;
+    }
+
+    return {
+      television: preferredTelevision.television,
+      note: `Se asignó un televisor desde ${preferredTelevision.television.salon}, donde hay ${preferredTelevision.television.roomTvCount} televisores.`,
+      needsReturnReminder: false,
+    };
+  }
+
+  const fallback = scored.find((candidate) => !candidate.roomConflict);
+  if (!fallback) {
+    return null;
+  }
+
+  return {
+    television: fallback.television,
+    note: `Se asignó un televisor desde ${fallback.television.salon}. Devuélvelo antes de que inicie la próxima clase en ese salón.`,
+    needsReturnReminder: true,
+  };
+};
+
 const updateInventoryItemRoom = async (db: any, itemId: string, room: string) => {
   await db.$queryRaw`
     UPDATE public.inventory_items
@@ -230,6 +459,8 @@ export const createReservationRequest = async (payload: CreateReservationInput) 
   await ensureReservationsSchemaReady();
 
   const destinationRoom = payload.destinationRoomId ? await getRoomByIdentifier(payload.destinationRoomId) : null;
+  const destinationRoomLabel = destinationRoom?.nombre ?? payload.destinationRoomId ?? null;
+  const destinationRoomId = destinationRoom?.id ?? payload.destinationRoomId ?? null;
   const confirmationToken = generateConfirmationToken();
 
   if (payload.resourceType === "rooms") {
@@ -315,25 +546,56 @@ export const createReservationRequest = async (payload: CreateReservationInput) 
     return { id };
   }
 
-  // Equipment reservation
-  const item = await getInventoryItemById(payload.resourceId);
-  if (!item) {
-    throw new Error("No se encontro el elemento de inventario seleccionado");
-  }
-
-  if ((item.estado ?? "").toLowerCase() !== "disponible") {
-    throw new Error("El elemento seleccionado no esta disponible");
-  }
-
-  if (!destinationRoom) {
+  // Equipment / televisor reservation
+  const requiresDestinationRoom = payload.resourceType === "equipment" || payload.resourceType === "televisor";
+  if (requiresDestinationRoom && !destinationRoomLabel) {
     throw new Error("Debes seleccionar el salon de destino");
   }
 
-  const originalRoomLabel = item.salon;
+  const item = payload.resourceType === "equipment" ? await getInventoryItemById(payload.resourceId) : null;
+  if (payload.resourceType === "equipment") {
+    if (!item) {
+      throw new Error("No se encontro el elemento de inventario seleccionado");
+    }
+
+    if ((item.estado ?? "").toLowerCase() !== "disponible") {
+      throw new Error("El elemento seleccionado no esta disponible");
+    }
+  }
+
+  let assignedTelevision: TelevisionCandidate | null = null;
+  let needsReturnReminder = false;
+  let televisionAssignmentNote: string | null = null;
+
+  if (payload.resourceType === "televisor") {
+    const selected = await selectTelevisionForReservation(toIsoDate(payload.bookingDate), payload.startTime, payload.endTime, destinationRoomLabel ?? "");
+    if (!selected) {
+      throw new Error("No hay televisores disponibles para el horario seleccionado");
+    }
+
+    assignedTelevision = selected.television;
+    needsReturnReminder = selected.needsReturnReminder;
+    televisionAssignmentNote = selected.note;
+  }
+
+  const inventoryItem = payload.resourceType === "equipment" ? item : assignedTelevision ? await getInventoryItemById(assignedTelevision.id) : null;
+  if (payload.resourceType === "televisor" && !inventoryItem) {
+    throw new Error("No se encontro el televisor seleccionado");
+  }
+
+  const originalRoomLabel = inventoryItem?.salon ?? null;
+  const reservationResourceId = payload.resourceType === "televisor" ? assignedTelevision?.id ?? payload.resourceId : payload.resourceId;
+  const reservationResourceLabel = payload.resourceType === "televisor" ? assignedTelevision?.nombre ?? payload.resourceId : item?.nombre ?? payload.resourceId;
+  const reservationResourceCode = payload.resourceType === "televisor" ? assignedTelevision?.codigo ?? null : item?.codigo ?? null;
+  const reservationResourceContext = payload.resourceType === "televisor"
+    ? (televisionAssignmentNote ?? (assignedTelevision ? `Asignación automática. Origen: ${assignedTelevision.salon}.` : "Asignación automática"))
+    : item?.grupo ?? null;
 
   return prisma.$transaction(async (tx) => {
-    // Update inventory item location
-    await updateInventoryItemRoom(tx, item.id, destinationRoom.nombre);
+    if (payload.resourceType === "equipment" && item) {
+      // Update inventory item location
+      await updateInventoryItemRoom(tx, item.id, destinationRoomLabel ?? item.salon);
+    }
 
     // Create reservation
     const rows = await tx.$queryRaw<Array<{ id: string }>>`
@@ -362,16 +624,16 @@ export const createReservationRequest = async (payload: CreateReservationInput) 
         created_by_staff_id
       )
       VALUES (
-        'equipment',
-        ${item.id},
-        ${item.nombre},
-        ${item.grupo},
-        ${item.codigo},
-        ${item.salon},
+        ${payload.resourceType},
+        ${reservationResourceId},
+        ${reservationResourceLabel},
+        ${reservationResourceContext},
+        ${reservationResourceCode},
+        ${originalRoomLabel},
         ${null},
         ${originalRoomLabel},
-        ${destinationRoom.id},
-        ${destinationRoom.nombre},
+        ${destinationRoomId},
+        ${destinationRoomLabel},
         ${toIsoDate(payload.bookingDate)},
         ${payload.startTime},
         ${payload.endTime},
@@ -399,14 +661,15 @@ export const createReservationRequest = async (payload: CreateReservationInput) 
         id,
         requesterName: payload.requesterName,
         requesterEmail: payload.requesterEmail,
-        resourceLabel: item.nombre,
-        resourceType: "equipment",
+        resourceLabel: reservationResourceLabel,
+        resourceType: payload.resourceType,
         bookingDate: toIsoDate(payload.bookingDate),
         startTime: payload.startTime,
         endTime: payload.endTime,
         purpose: payload.purpose,
-        destinationRoom: destinationRoom.nombre,
         confirmationToken,
+        returnNote: payload.resourceType === "televisor" ? televisionAssignmentNote : null,
+        ...(destinationRoomLabel ? { destinationRoom: destinationRoomLabel } : {}),
       };
 
       // Send email asynchronously without blocking the response
@@ -415,8 +678,59 @@ export const createReservationRequest = async (payload: CreateReservationInput) 
       });
     }
 
-    return { id };
+    return {
+      id,
+      assignmentLabel: payload.resourceType === "televisor" ? reservationResourceLabel : null,
+      returnNote: payload.resourceType === "televisor" ? televisionAssignmentNote : null,
+    };
   });
+};
+
+export const markTelevisionDisplaced = async (reservationId: string) => {
+  await ensureReservationsSchemaReady();
+
+  const reservation = await getReservationRequestById(reservationId);
+  if (!reservation) {
+    throw new Error("No se encontro la solicitud de reserva");
+  }
+
+  if (reservation.resourceType !== "televisor") {
+    throw new Error("Solo las reservas de televisor pueden marcarse como desplazadas");
+  }
+
+  if (!reservation.destinationRoomLabel) {
+    throw new Error("Debes seleccionar el salon de destino");
+  }
+
+  if (reservation.status === "devuelto") {
+    throw new Error("La solicitud ya fue devuelta");
+  }
+
+  const destinationRoom = reservation.destinationRoomId ? await getRoomByIdentifier(reservation.destinationRoomId) : null;
+  const destinationRoomLabel = destinationRoom?.nombre ?? reservation.destinationRoomLabel;
+
+  const updated = await prisma.$transaction(async (tx) => {
+    await tx.$queryRaw`
+      UPDATE public.inventory_items
+      SET salon = ${destinationRoomLabel}, updated_at = now()
+      WHERE id = ${reservation.resourceId}::uuid
+    `;
+
+    const rows = await tx.$queryRaw<Array<{ id: string }>>`
+      UPDATE public.reservas_solicitudes
+      SET status = 'confirmada', updated_at = now()
+      WHERE id = ${reservationId}::uuid
+      RETURNING id::text AS id
+    `;
+
+    return rows[0]?.id ?? null;
+  });
+
+  if (!updated) {
+    throw new Error("No se pudo marcar el televisor como desplazado");
+  }
+
+  return { id: updated };
 };
 
 export const getReservationRequestById = async (id: string) => {
@@ -508,7 +822,7 @@ export const returnReservationRequest = async (reservationId: string) => {
     throw new Error("No se encontro la solicitud de reserva");
   }
 
-  if (reservation.resourceType !== "equipment") {
+  if (reservation.resourceType !== "equipment" && reservation.resourceType !== "televisor") {
     throw new Error("Solo los elementos de inventario pueden devolverse");
   }
 
@@ -631,7 +945,7 @@ export const closeReservationRequest = async (reservationId: string, requesterSt
   }
 
   // For equipment, perform the return workflow which restores inventory and marks as devuelto
-  if (reservation.resourceType === "equipment") {
+  if (reservation.resourceType === "equipment" || reservation.resourceType === "televisor") {
     return await returnReservationRequest(reservationId);
   }
 
@@ -668,7 +982,7 @@ export const reportReservationRequest = async (reservationId: string, requesterS
   }
 
   // For equipment, still attempt to restore original location, but mark as reported
-  if (reservation.resourceType === "equipment") {
+  if (reservation.resourceType === "equipment" || reservation.resourceType === "televisor") {
     return prisma.$transaction(async (tx) => {
       if (!reservation.resourceOriginalRoomLabel) {
         throw new Error("No se pudo recuperar la ubicacion original del elemento");

@@ -847,15 +847,19 @@ export const updateTaskCatalog = async (payload: UpdateCatalogTaskInput) => {
 
 export const deleteTaskCatalog = async (id: string) => {
   return prisma.$transaction(async (tx) => {
-    const usage = await tx.$queryRaw<Array<{ total: number }>>`
-      SELECT COUNT(*)::int AS total
-      FROM public.tareas_instancias
-      WHERE tarea_catalogo_id = ${id}::uuid
+    await tx.$executeRaw`
+      DELETE FROM public.tareas_asignaciones
+      WHERE tarea_instancia_id IN (
+        SELECT id
+        FROM public.tareas_instancias
+        WHERE tarea_catalogo_id = ${id}::uuid
+      )
     `;
 
-    if ((usage[0]?.total ?? 0) > 0) {
-      throw new Error("No se puede eliminar: esta tarea de catalogo ya tiene instancias creadas");
-    }
+    await tx.$executeRaw`
+      DELETE FROM public.tareas_instancias
+      WHERE tarea_catalogo_id = ${id}::uuid
+    `;
 
     const deleted = await tx.$queryRaw<Array<{ id: string }>>`
       DELETE FROM public.tareas_catalogo

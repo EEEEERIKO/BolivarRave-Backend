@@ -7,12 +7,13 @@ export interface ReservationEmailData {
   requesterName: string;
   requesterEmail: string;
   resourceLabel: string;
-  resourceType: "rooms" | "equipment";
+  resourceType: "rooms" | "equipment" | "televisor";
   bookingDate: string;
   startTime: string;
   endTime: string;
   purpose: string;
   destinationRoom?: string;
+  returnNote?: string | null;
   confirmationToken: string;
 }
 
@@ -30,7 +31,9 @@ const escapeHtml = (value: string): string =>
     .replace(/'/g, "&#39;");
 
 const formatReservationType = (resourceType: string): string => {
-  return resourceType === "rooms" ? "Salón/Aula" : "Equipo";
+  if (resourceType === "rooms") return "Salón/Aula";
+  if (resourceType === "televisor") return "Televisor";
+  return "Equipo";
 };
 
 const buildEmailHtml = (data: ReservationEmailData): string => {
@@ -43,9 +46,10 @@ const buildEmailHtml = (data: ReservationEmailData): string => {
   const endTime = escapeHtml(data.endTime);
   const purpose = escapeHtml(data.purpose);
   const destinationRoom = data.destinationRoom ? escapeHtml(data.destinationRoom) : null;
-  const returnWarning = data.resourceType === "equipment"
-    ? `Debes devolver el equipo a más tardar a las ${endTime}. Si se daña, falta algún componente o se incumple el horario, puede aplicar una penalización.`
-    : `Debes dejar el salón en buen estado y respetar el horario confirmado. El incumplimiento o cualquier daño reportado puede generar una penalización.`;
+  const returnWarning = data.returnNote
+    ?? (data.resourceType === "equipment" || data.resourceType === "televisor"
+      ? `Debes devolver el ${data.resourceType === "televisor" ? "televisor" : "equipo"} a más tardar a las ${endTime}. Si se daña, falta algún componente o se incumple el horario, puede aplicar una penalización.`
+      : `Debes dejar el salón en buen estado y respetar el horario confirmado. El incumplimiento o cualquier daño reportado puede generar una penalización.`);
 
   return `
 <!DOCTYPE html>
