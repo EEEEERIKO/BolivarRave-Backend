@@ -8,6 +8,7 @@ import { auditorioRouter } from "./modules/auditorio/routes";
 import { reservasRouter } from "./modules/reservas/routes";
 import { inventoryRouter } from "./modules/inventory/routes";
 import { staffRouter } from "./modules/staff/routes";
+import { registroRouter } from "./modules/registro/routes";
 import { tasksRouter } from "./modules/tasks/routes";
 import { initializeWebSocket, getWebSocketServer } from "./lib/websocket";
 import { requireAdminOrMonitorRole, requireAuthToken } from "./lib/auth";
@@ -130,6 +131,7 @@ app.use("/api/auditorio", auditorioRouter);
 app.use("/api/reservas", reservasRouter);
 app.use("/api/inventory", inventoryRouter);
 app.use("/api/staff", staffRouter);
+app.use("/api/registro", registroRouter);
 app.use("/api/tasks", requireAdminOrMonitorRole, tasksRouter);
 
 app.use((error: unknown, _req: express.Request, res: express.Response, _next: express.NextFunction) => {

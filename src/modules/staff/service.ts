@@ -664,6 +664,52 @@ export const getStaffById = async (id: string) => {
   return mapped[0] ?? null;
 };
 
+export const getStaffByCedula = async (cedula: string) => {
+  await ensureStaffSecuritySchemaReady();
+
+  const rows = await prisma.$queryRaw<StaffRawRow[]>`
+    SELECT
+      s.id::text AS id,
+      s.numero_staff,
+      s.role_id,
+      s.rol,
+      s.nombres,
+      s.apellidos,
+      s.cedula,
+      s.telefono,
+      TO_CHAR(s.fecha_nacimiento, 'YYYY-MM-DD') AS fecha_nacimiento,
+      s.carrera,
+      s.tipo_contrato,
+      s.conocimiento_sonido,
+      s.estado,
+      s.balance_horas,
+      TO_CHAR(s.fecha_creacion, 'YYYY-MM-DD"T"HH24:MI:SS.MS"Z"') AS fecha_creacion,
+      b.id::text AS bloqueo_id,
+      b.dia_semana AS bloqueo_dia_semana,
+      CASE
+        WHEN b.hora_inicio IS NULL THEN NULL
+        ELSE TO_CHAR(b.hora_inicio, 'HH24:MI')
+      END AS bloqueo_hora_inicio,
+      CASE
+        WHEN b.hora_fin IS NULL THEN NULL
+        ELSE TO_CHAR(b.hora_fin, 'HH24:MI')
+      END AS bloqueo_hora_fin
+      , h.id::text AS habilidad_id
+      , h.nombre AS habilidad_nombre
+      , (c.staff_id IS NOT NULL) AS tiene_credencial
+    FROM public.staff s
+    LEFT JOIN public.staff_bloqueos_clase b ON b.staff_id = s.id
+    LEFT JOIN public.staff_habilidades sh ON sh.staff_id = s.id
+    LEFT JOIN public.habilidades h ON h.id = sh.habilidad_id
+    LEFT JOIN public.staff_credentials c ON c.staff_id = s.id
+    WHERE s.cedula = ${cedula}
+    ORDER BY b.dia_semana ASC NULLS LAST, b.hora_inicio ASC NULLS LAST
+  `;
+
+  const mapped = mapStaffRows(rows);
+  return mapped[0] ?? null;
+};
+
 export const createStaff = async (payload: CreateStaffInput) => {
   await ensureStaffSecuritySchemaReady();
 

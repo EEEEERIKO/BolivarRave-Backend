@@ -6,6 +6,7 @@ import {
   ensureReservationsSchemaReady,
   getReservationRequestById,
   listReservationRequests,
+  listTelevisionReservationCandidates,
   markTelevisionDisplaced,
   returnReservationRequest,
   confirmReservationRequest,
@@ -141,6 +142,36 @@ reservasRouter.get("/mine", requireAuthToken, async (req, res, next) => {
     const reservas = await listReservationRequestsByCreator(authUser.staffId);
     return res.json({ reservas });
   } catch (error) {
+    return next(error);
+  }
+});
+
+reservasRouter.get("/televisor-candidates", requireAuthToken, async (req, res, next) => {
+  try {
+    const bookingDate = z.string().regex(dateRegex, "Fecha invalida (YYYY-MM-DD)").parse(String(req.query.bookingDate ?? ""));
+    const startTime = z.string().regex(timeRegex, "Hora inicio invalida (HH:mm)").parse(String(req.query.startTime ?? ""));
+    const endTime = z.string().regex(timeRegex, "Hora fin invalida (HH:mm)").parse(String(req.query.endTime ?? ""));
+
+    if (endTime <= startTime) {
+      return res.status(400).json({ error: "La hora de fin debe ser posterior a la hora de inicio." });
+    }
+
+    const candidates = await listTelevisionReservationCandidates(bookingDate, startTime, endTime);
+
+    return res.json({
+      candidates,
+      recommendedResourceId: candidates[0]?.id ?? null,
+      message:
+        candidates.length > 0
+          ? "Se listaron solo los televisores que cumplen con los conflictos de horario."
+          : "No hay televisores disponibles por los conflictos de horario.",
+    });
+  } catch (error) {
+    if (error instanceof z.ZodError) {
+      const details = error.issues.map((iss) => ({ path: iss.path.map(String).join('.') || 'query', message: iss.message }));
+      return res.status(400).json({ error: 'Parametros invalidos', details });
+    }
+
     return next(error);
   }
 });

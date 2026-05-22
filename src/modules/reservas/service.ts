@@ -51,6 +51,12 @@ type TelevisionSelection = {
   needsReturnReminder: boolean;
 };
 
+export type TelevisionReservationCandidate = TelevisionCandidate & {
+  priority: number;
+  note: string | null;
+  needsReturnReminder: boolean;
+};
+
 type RoomReservationConflict = {
   resourceId: string;
   bookingDate: string;
@@ -303,6 +309,133 @@ const getRoomDistanceScore = (sourceRoom: string, destinationRoom: string) => {
   return sourceRoom === destinationRoom ? 0 : 99;
 };
 
+const weekdayFromIsoDate = (isoDate: string) => {
+  const date = new Date(`${isoDate}T00:00:00`);
+  if (Number.isNaN(date.getTime())) {
+    return "Lunes";
+  }
+
+  const names = ["Domingo", "Lunes", "Martes", "Miercoles", "Jueves", "Viernes", "Sabado"] as const;
+  return names[date.getDay()] ?? "Lunes";
+};
+
+type RoomClassSlot = {
+  roomLabel: string;
+  startTime: string;
+  endTime: string;
+  subject: string | null;
+  instructor: string | null;
+};
+
+const getRoomClassSlotsForDate = async (roomLabel: string, bookingDate: string) => {
+  const day = weekdayFromIsoDate(bookingDate);
+
+  const rows = await prisma.$queryRaw<RoomClassSlot[]>`
+    SELECT
+      COALESCE(sx.nombre_bloque, sb.nombre_bloque) AS "roomLabel",
+      TO_CHAR(COALESCE(x.hora_inicio, h.hora_inicio), 'HH24:MI') AS "startTime",
+      TO_CHAR(COALESCE(x.hora_fin, h.hora_fin), 'HH24:MI') AS "endTime",
+      e.nombre_principal AS "subject",
+      e.responsable AS "instructor"
+    FROM public.horarios_evento h
+    JOIN public.eventos e ON e.id = h.evento_id
+    JOIN public.salones sb ON sb.id = h.salon_id
+    LEFT JOIN public.horarios_evento_excepciones x
+      ON x.horario_id = h.id
+     AND x.fecha = ${bookingDate}::date
+    LEFT JOIN public.salones sx ON sx.id = x.salon_id
+    LEFT JOIN public.solicitudes_salon sr ON sr.evento_id = e.id
+    WHERE LOWER(TRIM(COALESCE(sx.nombre_bloque, sb.nombre_bloque))) = LOWER(TRIM(${roomLabel}))
+      AND COALESCE(x.dia_semana, h.dia_semana) = ${day}::public.dia_semana_enum
+      AND ${bookingDate}::date BETWEEN e.fecha_inicio AND e.fecha_fin
+      AND (sr.id IS NULL OR sr.estado <> 'rechazada')
+    ORDER BY COALESCE(x.hora_inicio, h.hora_inicio) ASC
+  `;
+
+  return rows;
+};
+
+const buildTelevisionCandidateNote = (
+  television: TelevisionCandidate,
+  slots: RoomClassSlot[],
+  bookingDate: string,
+  startTime: string,
+  endTime: string,
+) => {
+  const reservationEndMinutes = timeToMinutes(endTime);
+  const nextClass = slots.find((slot) => timeToMinutes(slot.startTime) >= reservationEndMinutes) ?? null;
+
+  if (television.roomTvCount >= 2) {
+    if (nextClass) {
+      return `Es un salón con 2 televisores. Debes moverlo antes de las ${nextClass.startTime} para no interrumpir la clase de ${television.salon}.`;
+    }
+
+    return `Es un salón con 2 televisores y no tiene clase posterior en la fecha seleccionada.`;
+  }
+
+  if (nextClass) {
+    return `Este televisor cumple porque no tiene clase durante la reserva. Si lo vas a devolver el mismo día, hazlo antes de las ${nextClass.startTime} para no interferir con la clase de ${television.salon}.`;
+  }
+
+  return `Este televisor cumple porque no tiene clase durante la reserva ni clases posteriores en su salón para la fecha seleccionada.`;
+};
+
+const getTelevisionReservationCandidates = async (bookingDate: string, startTime: string, endTime: string) => {
+  const televisions = await getTelevisionCandidates();
+  const reservedTelevisionIds = new Set((await getTelevisionItemConflicts(bookingDate, startTime, endTime)).map((row) => row.resourceId));
+  const availableTelevisions = televisions.filter((television) => !reservedTelevisionIds.has(television.id));
+
+  const slotMaps = new Map<string, RoomClassSlot[]>();
+  const uniqueRooms = Array.from(new Map(availableTelevisions.map((television) => [normalizeRoomLabel(television.salon), television.salon])).values());
+
+  await Promise.all(
+    uniqueRooms.map(async (roomLabel) => {
+      const slots = await getRoomClassSlotsForDate(roomLabel, bookingDate);
+      slotMaps.set(normalizeRoomLabel(roomLabel), slots);
+    }),
+  );
+
+  const eligibleCandidates = availableTelevisions
+    .map<TelevisionReservationCandidate | null>((television) => {
+      const slots = slotMaps.get(normalizeRoomLabel(television.salon)) ?? [];
+      const hasOverlap = slots.some((slot) => timeRangesOverlap(slot.startTime, slot.endTime, startTime, endTime));
+
+      if (hasOverlap) {
+        return null;
+      }
+
+      const note = buildTelevisionCandidateNote(television, slots, bookingDate, startTime, endTime);
+      return {
+        ...television,
+        priority: television.roomTvCount >= 2 ? 0 : 1,
+        note,
+        needsReturnReminder: television.roomTvCount < 2,
+      };
+    })
+    .filter((candidate): candidate is TelevisionReservationCandidate => candidate !== null)
+    .sort((left, right) => {
+      if (left.priority !== right.priority) {
+        return left.priority - right.priority;
+      }
+
+      if (left.roomTvCount !== right.roomTvCount) {
+        return right.roomTvCount - left.roomTvCount;
+      }
+
+      if (left.salon !== right.salon) {
+        return left.salon.localeCompare(right.salon);
+      }
+
+      return left.codigo.localeCompare(right.codigo);
+    });
+
+  return eligibleCandidates;
+};
+
+export const listTelevisionReservationCandidates = async (bookingDate: string, startTime: string, endTime: string) => {
+  return getTelevisionReservationCandidates(bookingDate, startTime, endTime);
+};
+
 const getTelevisionCandidates = async (): Promise<TelevisionCandidate[]> => {
   const rows = await prisma.$queryRaw<TelevisionCandidate[]>`
     SELECT
@@ -370,80 +503,42 @@ const getTelevisionItemConflicts = async (bookingDate: string, startTime: string
   return rows.filter((row) => timeRangesOverlap(row.startTime, row.endTime, startTime, endTime));
 };
 
-const selectTelevisionForReservation = async (bookingDate: string, startTime: string, endTime: string, destinationRoomLabel: string) => {
-  const televisions = await getTelevisionCandidates();
-  const reservedTelevisionIds = new Set((await getTelevisionItemConflicts(bookingDate, startTime, endTime)).map((row) => row.resourceId));
-  const roomConflicts = await getTelevisionRoomConflicts(bookingDate, startTime, endTime);
-  const availableTelevisions = televisions.filter((television) => !reservedTelevisionIds.has(television.id));
-  const normalizedDestinationRoom = normalizeRoomLabel(destinationRoomLabel);
-
-  const scored = availableTelevisions
-    .map((television) => {
-      const sameRoom = normalizeRoomLabel(television.salon) === normalizedDestinationRoom;
-      const roomConflict = roomConflicts.some((conflict) => normalizeRoomLabel(conflict.resourceLabel) === normalizeRoomLabel(television.salon));
-      const roomDistanceScore = getRoomDistanceScore(television.salon, destinationRoomLabel);
-
-      return {
-        television,
-        sameRoom,
-        roomConflict,
-        roomDistanceScore,
-      };
-    })
-    .sort((left, right) => {
-      if (left.sameRoom !== right.sameRoom) {
-        return left.sameRoom ? -1 : 1;
-      }
-
-      const leftPriority = left.television.roomTvCount >= 2 ? 0 : 1;
-      const rightPriority = right.television.roomTvCount >= 2 ? 0 : 1;
-      if (leftPriority !== rightPriority) {
-        return leftPriority - rightPriority;
-      }
-
-      if (left.roomConflict !== right.roomConflict) {
-        return left.roomConflict ? 1 : -1;
-      }
-
-      if (left.roomDistanceScore !== right.roomDistanceScore) {
-        return left.roomDistanceScore - right.roomDistanceScore;
-      }
-
-      return left.television.salon.localeCompare(right.television.salon);
-    });
-
-  const bestSameRoom = scored.find((candidate) => candidate.sameRoom);
-  if (bestSameRoom) {
-    return {
-      television: bestSameRoom.television,
-      note: `El televisor ya está en ${destinationRoomLabel}; no requiere traslado.`,
-      needsReturnReminder: false,
-    };
-  }
-
-  const preferred = scored.filter((candidate) => candidate.television.roomTvCount >= 2);
-  if (preferred.length > 0) {
-    const preferredTelevision = preferred[0];
-    if (!preferredTelevision) {
-      return null;
-    }
-
-    return {
-      television: preferredTelevision.television,
-      note: `Se asignó un televisor desde ${preferredTelevision.television.salon}, donde hay ${preferredTelevision.television.roomTvCount} televisores.`,
-      needsReturnReminder: false,
-    };
-  }
-
-  const fallback = scored.find((candidate) => !candidate.roomConflict);
-  if (!fallback) {
+const selectTelevisionForReservation = async (
+  bookingDate: string,
+  startTime: string,
+  endTime: string,
+  destinationRoomLabel: string,
+  preferredTelevisionId?: string | null,
+) => {
+  const candidates = await getTelevisionReservationCandidates(bookingDate, startTime, endTime);
+  if (candidates.length === 0) {
     return null;
   }
 
+  if (preferredTelevisionId) {
+    const preferred = candidates.find((candidate) => candidate.id === preferredTelevisionId);
+    if (!preferred) {
+      throw new Error("El televisor seleccionado no está disponible por conflictos de horario");
+    }
+
+    return {
+      television: preferred,
+      note: preferred.note,
+      needsReturnReminder: preferred.needsReturnReminder,
+    };
+  }
+
+  const preferred = candidates.find((candidate) => candidate.roomTvCount >= 2) ?? candidates[0];
+  if (!preferred) {
+    return null;
+  }
+
+  const destinationNote = destinationRoomLabel ? ` para ${destinationRoomLabel}` : "";
+
   return {
-    television: fallback.television,
-    note: `Se asignó un televisor desde ${fallback.television.salon}. Devuélvelo antes de que inicie la próxima clase en ese salón.`,
-    needsReturnReminder: true,
+    television: preferred,
+    note: preferred.note ?? `Se asignó un televisor${destinationNote}.`,
+    needsReturnReminder: preferred.needsReturnReminder,
   };
 };
 
@@ -574,7 +669,13 @@ export const createReservationRequest = async (payload: CreateReservationInput):
   let televisionAssignmentNote: string | null = null;
 
   if (payload.resourceType === "televisor") {
-    const selected = await selectTelevisionForReservation(toIsoDate(payload.bookingDate), payload.startTime, payload.endTime, destinationRoomLabel ?? "");
+    const selected = await selectTelevisionForReservation(
+      toIsoDate(payload.bookingDate),
+      payload.startTime,
+      payload.endTime,
+      destinationRoomLabel ?? "",
+      payload.resourceId && payload.resourceId !== "AUTO" ? payload.resourceId : null,
+    );
     if (!selected) {
       throw new Error("No hay televisores disponibles para el horario seleccionado");
     }
