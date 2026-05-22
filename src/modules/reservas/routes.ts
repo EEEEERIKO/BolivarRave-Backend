@@ -6,6 +6,7 @@ import {
   ensureReservationsSchemaReady,
   getReservationRequestById,
   listReservationRequests,
+  markTelevisionDisplaced,
   returnReservationRequest,
   confirmReservationRequest,
   cancelReservationRequest,
@@ -22,7 +23,7 @@ const timeRegex = /^\d{2}:\d{2}$/;
 
 const reservationBodySchema = z
   .object({
-    resourceType: z.enum(["rooms", "equipment"]),
+    resourceType: z.enum(["rooms", "equipment", "televisor"]),
     resourceId: z.string().trim().min(1),
     bookingDate: z.string().regex(dateRegex, "Fecha invalida (YYYY-MM-DD)"),
     startTime: z.string().regex(timeRegex, "Hora inicio invalida (HH:mm)"),
@@ -172,6 +173,8 @@ reservasRouter.post("/", requireAuthToken, async (req, res, next) => {
     return res.status(201).json({
       message: "Reserva registrada correctamente.",
       reservationId: created.id,
+      assignmentLabel: created.assignmentLabel ?? null,
+      returnNote: created.returnNote ?? null,
     });
   } catch (error) {
     if (error instanceof z.ZodError) {
@@ -196,6 +199,40 @@ reservasRouter.patch("/:reservationId/return", requireAdminOrMonitorRole, async 
       message: "Elemento devuelto correctamente.",
       reservationId: returned.id,
     });
+  } catch (error) {
+    if (error instanceof z.ZodError) {
+      const details = error.issues.map((iss) => ({ path: iss.path.map(String).join('.') || 'params', message: iss.message }));
+      return res.status(400).json({ error: 'Parametros invalidos', details });
+    }
+
+    if (handleKnownReservationError(error, res)) {
+      return;
+    }
+
+    return next(error);
+  }
+});
+
+reservasRouter.patch("/:reservationId/televisor-displaced", requireAuthToken, async (req, res, next) => {
+  try {
+    const reservationId = z.string().uuid().parse(req.params.reservationId);
+    const authUser = (req as AuthenticatedRequest).authUser;
+
+    if (!authUser?.staffId) return res.status(401).json({ error: "No autorizado" });
+
+    const isAdminOrMonitor = authUser.role === "admin" || authUser.role === "monitor";
+    const reservation = await getReservationRequestById(reservationId);
+
+    if (!reservation) {
+      return res.status(404).json({ error: "No encontramos la solicitud de reserva." });
+    }
+
+    if (!isAdminOrMonitor && reservation.createdByStaffId !== authUser.staffId) {
+      return res.status(403).json({ error: "No autorizado para modificar esta solicitud." });
+    }
+
+    const displaced = await markTelevisionDisplaced(reservationId);
+    return res.json({ message: "Televisor marcado como desplazado.", reservationId: displaced.id });
   } catch (error) {
     if (error instanceof z.ZodError) {
       const details = error.issues.map((iss) => ({ path: iss.path.map(String).join('.') || 'params', message: iss.message }));
@@ -272,7 +309,7 @@ reservasRouter.patch("/:reservationId/report", requireAuthToken, async (req, res
     if (!authUser?.staffId) return res.status(401).json({ error: "No autorizado" });
 
     const isAdminOrMonitor = authUser.role === "admin" || authUser.role === "monitor";
-    const reported = await reportReservationRequest(reservationId, authUser.staffId, isAdminOrMonitor);
+    const reported = await reportReservationRequest(reservationId, authUser.staffId, isAdminOrMonitor, reportReason ?? null);
 
     if (reportReason) {
       console.warn(`[Reservas] Reporte de reserva ${reservationId}: ${reportReason}`);

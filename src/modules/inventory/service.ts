@@ -63,6 +63,8 @@ const ensureInventorySchema = async () => {
       salon text NOT NULL,
       estado text NOT NULL DEFAULT 'Disponible',
       defectuoso boolean NOT NULL DEFAULT false,
+      hdmi_assigned boolean NOT NULL DEFAULT false,
+      hdmi_item_id uuid NULL,
       precio numeric(12,2) NOT NULL DEFAULT 0,
       motivo text,
       orden integer NOT NULL DEFAULT 0,
@@ -81,6 +83,16 @@ const ensureInventorySchema = async () => {
   await prisma.$executeRaw`
     ALTER TABLE public.inventory_items
     ADD COLUMN IF NOT EXISTS precio numeric(12,2) NOT NULL DEFAULT 0
+  `;
+
+  await prisma.$executeRaw`
+    ALTER TABLE public.inventory_items
+    ADD COLUMN IF NOT EXISTS hdmi_assigned boolean NOT NULL DEFAULT false
+  `;
+
+  await prisma.$executeRaw`
+    ALTER TABLE public.inventory_items
+    ADD COLUMN IF NOT EXISTS hdmi_item_id uuid NULL
   `;
 
   await prisma.$executeRaw`
@@ -212,6 +224,8 @@ export type InventoryItemRow = {
   order: number;
   createdAt: string;
   updatedAt: string;
+  hdmiAssigned: boolean;
+  hdmiItemId: string | null;
 };
 
 export const listInventoryGroups = async () => {
@@ -252,6 +266,8 @@ export const listInventoryItems = async (groupId?: string) => {
         i.estado AS status,
         i.defectuoso AS defective,
         i.motivo AS motivo,
+        COALESCE(i.hdmi_assigned, false) AS "hdmiAssigned",
+        i.hdmi_item_id::text AS "hdmiItemId",
         COALESCE(i.precio, 0)::double precision AS price,
         i.orden AS "order",
         TO_CHAR(i.created_at, 'YYYY-MM-DD"T"HH24:MI:SS.MS"Z"') AS "createdAt",
@@ -276,8 +292,10 @@ export const listInventoryItems = async (groupId?: string) => {
       i.salon AS room,
       i.estado AS status,
       i.defectuoso AS defective,
-      i.motivo AS motivo,
-         COALESCE(i.precio, 0)::double precision AS price,
+    i.motivo AS motivo,
+      COALESCE(i.hdmi_assigned, false) AS "hdmiAssigned",
+      i.hdmi_item_id::text AS "hdmiItemId",
+      COALESCE(i.precio, 0)::double precision AS price,
       i.orden AS "order",
       TO_CHAR(i.created_at, 'YYYY-MM-DD"T"HH24:MI:SS.MS"Z"') AS "createdAt",
       TO_CHAR(i.updated_at, 'YYYY-MM-DD"T"HH24:MI:SS.MS"Z"') AS "updatedAt"
@@ -409,12 +427,14 @@ export const createInventoryItem = async (payload: {
   motivo?: string | null;
   order?: number;
   price?: number;
+  hdmiAssigned?: boolean;
+  hdmiItemId?: string | null;
 }) => {
   await ensureInventorySchemaReady();
   await assertGroupExists(payload.groupId);
 
   const rows = await prisma.$queryRaw<Array<{ id: string }>>`
-    INSERT INTO public.inventory_items (group_id, nombre, codigo, salon, estado, defectuoso, precio, motivo, orden)
+    INSERT INTO public.inventory_items (group_id, nombre, codigo, salon, estado, defectuoso, hdmi_assigned, hdmi_item_id, precio, motivo, orden)
     VALUES (
       ${payload.groupId}::uuid,
       ${payload.name},
@@ -422,6 +442,8 @@ export const createInventoryItem = async (payload: {
       ${payload.room},
       ${payload.status},
       ${payload.defective},
+      ${payload.hdmiAssigned ?? false},
+      ${payload.hdmiItemId ?? null},
       ${payload.price ?? 0},
       ${payload.motivo ?? null},
       ${payload.order ?? (await getNextItemOrder(payload.groupId))}
@@ -447,32 +469,48 @@ export const updateInventoryItem = async (itemId: string, payload: {
   motivo?: string | null;
   order?: number;
   price?: number;
+  hdmiAssigned?: boolean;
+  hdmiItemId?: string | null;
+  alsoMoveHdmi?: boolean;
 }) => {
   await ensureInventorySchemaReady();
   await assertGroupExists(payload.groupId);
+  const updatedIdRows = await prisma.$transaction(async (tx) => {
+    const r = await tx.$queryRaw<Array<{ id: string }>>`
+      UPDATE public.inventory_items
+      SET
+        group_id = ${payload.groupId}::uuid,
+        nombre = ${payload.name},
+        codigo = ${payload.code},
+        salon = ${payload.room},
+        estado = ${payload.status},
+        defectuoso = ${payload.defective},
+        hdmi_assigned = COALESCE(${payload.hdmiAssigned ?? null}, hdmi_assigned),
+        hdmi_item_id = ${payload.hdmiItemId ?? null},
+        precio = COALESCE(${payload.price ?? null}, precio),
+        motivo = ${payload.motivo ?? null},
+        orden = COALESCE(${payload.order ?? null}, orden),
+        updated_at = now()
+      WHERE id = ${itemId}::uuid
+      RETURNING id::text AS id
+    `;
 
-  const rows = await prisma.$queryRaw<Array<{ id: string }>>`
-    UPDATE public.inventory_items
-    SET
-      group_id = ${payload.groupId}::uuid,
-      nombre = ${payload.name},
-      codigo = ${payload.code},
-      salon = ${payload.room},
-      estado = ${payload.status},
-      defectuoso = ${payload.defective},
-      precio = COALESCE(${payload.price ?? null}, precio),
-      motivo = ${payload.motivo ?? null},
-      orden = COALESCE(${payload.order ?? null}, orden),
-      updated_at = now()
-    WHERE id = ${itemId}::uuid
-    RETURNING id::text AS id
-  `;
+    if (!r[0]?.id) {
+      throw new Error("No se encontro el elemento de inventario");
+    }
 
-  if (!rows[0]?.id) {
-    throw new Error("No se encontro el elemento de inventario");
-  }
+    if (payload.alsoMoveHdmi && payload.hdmiItemId) {
+      await tx.$queryRaw`
+        UPDATE public.inventory_items
+        SET salon = ${payload.room}, updated_at = now()
+        WHERE id = ${payload.hdmiItemId}::uuid
+      `;
+    }
 
-  const updated = await getInventoryItemById(rows[0].id);
+    return r;
+  });
+
+  const updated = await getInventoryItemById(updatedIdRows[0]?.id);
   if (!updated) {
     throw new Error("No se encontro el elemento de inventario");
   }
