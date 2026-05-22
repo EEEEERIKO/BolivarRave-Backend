@@ -455,7 +455,13 @@ const updateInventoryItemRoom = async (db: any, itemId: string, room: string) =>
   `;
 };
 
-export const createReservationRequest = async (payload: CreateReservationInput) => {
+export type CreateReservationResult = {
+  id: string;
+  assignmentLabel: string | null;
+  returnNote: string | null;
+};
+
+export const createReservationRequest = async (payload: CreateReservationInput): Promise<CreateReservationResult> => {
   await ensureReservationsSchemaReady();
 
   const destinationRoom = payload.destinationRoomId ? await getRoomByIdentifier(payload.destinationRoomId) : null;
@@ -543,7 +549,7 @@ export const createReservationRequest = async (payload: CreateReservationInput) 
       });
     }
 
-    return { id };
+    return { id, assignmentLabel: null, returnNote: null };
   }
 
   // Equipment / televisor reservation
