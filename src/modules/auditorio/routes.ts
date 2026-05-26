@@ -41,6 +41,22 @@ const reservaBodySchema = z.object({
   horarios: z.array(horarioSchema).min(1),
 });
 
+const publicReservaBodySchema = z.object({
+  nombreEvento: z.string().trim().min(3).max(255),
+  correo: z.string().trim().email(),
+  confirmarCorreo: z.string().trim().email(),
+  fechaInicioPeriodo: z.string().regex(dateRegex, "Fecha inicio invalida (YYYY-MM-DD)"),
+  fechaFinPeriodo: z.string().regex(dateRegex, "Fecha fin invalida (YYYY-MM-DD)"),
+  numeroAsistentes: z.number().int().min(1).max(5000),
+  requierePantalla: z.boolean().default(false),
+  requiereSonido: z.boolean().default(false),
+  requiereMonitor: z.boolean().default(false),
+  requiereProyector: z.boolean().default(false),
+  requiereFiltroAgua: z.boolean().default(false),
+  observaciones: z.string().trim().max(4000).optional().nullable(),
+  horarios: z.array(horarioSchema).min(1),
+});
+
 const idParamsSchema = z.object({
   id: z.string().uuid(),
 });
@@ -52,6 +68,42 @@ const patchEstadoBodySchema = z.object({
 const toLocalDate = (isoDate: string) => {
   const [y, m, d] = isoDate.split("-").map(Number);
   return new Date(y ?? 0, (m ?? 1) - 1, d ?? 1);
+};
+
+const toDateKey = (date: Date) =>
+  `${date.getFullYear()}-${String(date.getMonth() + 1).padStart(2, "0")}-${String(date.getDate()).padStart(2, "0")}`;
+
+const getColombiaToday = () => {
+  const formatter = new Intl.DateTimeFormat("en-CA", {
+    timeZone: "America/Bogota",
+    year: "numeric",
+    month: "2-digit",
+    day: "2-digit",
+  });
+
+  const parts = formatter.formatToParts(new Date());
+  const year = Number(parts.find((part) => part.type === "year")?.value ?? "0");
+  const month = Number(parts.find((part) => part.type === "month")?.value ?? "1");
+  const day = Number(parts.find((part) => part.type === "day")?.value ?? "1");
+
+  return new Date(year, month - 1, day);
+};
+
+const validatePublicAdvanceNotice = (
+  fechaInicioPeriodo: string,
+  horarios: Array<{ fechaEspecifica: string; horaInicio: string; horaFin: string }>
+) => {
+  const minimumDateKey = toDateKey(new Date(getColombiaToday().getFullYear(), getColombiaToday().getMonth(), getColombiaToday().getDate() + 8));
+
+  if (fechaInicioPeriodo < minimumDateKey) {
+    throw new Error("La solicitud debe hacerse con al menos 8 días de anticipación.");
+  }
+
+  for (const horario of horarios) {
+    if (horario.fechaEspecifica < minimumDateKey) {
+      throw new Error("La solicitud debe hacerse con al menos 8 días de anticipación.");
+    }
+  }
 };
 
 const toMinutes = (value: string) => {
@@ -144,10 +196,31 @@ const handleKnownAuditorioWriteError = (error: unknown, res: import("express").R
   return false;
 };
 
-auditorioRouter.get("/reservas", requireAdminOrMonitorRole, async (_req, res, next) => {
+const toPublicReserva = (reserva: Awaited<ReturnType<typeof listReservasAuditorio>>[number]) => ({
+  id: reserva.id,
+  fechaInicioPeriodo: reserva.fechaInicioPeriodo,
+  fechaFinPeriodo: reserva.fechaFinPeriodo,
+  horarios: reserva.horarios.map((horario) => ({
+    id: horario.id,
+    fechaEspecifica: horario.fechaEspecifica,
+    horaInicio: horario.horaInicio,
+    horaFin: horario.horaFin,
+  })),
+});
+
+auditorioRouter.get("/reservas", async (_req, res, next) => {
   try {
     const reservas = await listReservasAuditorio();
     return res.json({ reservas });
+  } catch (error) {
+    return next(error);
+  }
+});
+
+auditorioRouter.get("/public/reservas", async (_req, res, next) => {
+  try {
+    const reservas = await listReservasAuditorio();
+    return res.json({ reservas: reservas.map(toPublicReserva) });
   } catch (error) {
     return next(error);
   }
@@ -179,7 +252,7 @@ auditorioRouter.get("/reservas/export", requireAdminOrMonitorRole, async (_req, 
   }
 });
 
-auditorioRouter.post("/reservas", requireAdminRole, async (req, res, next) => {
+auditorioRouter.post("/reservas", async (req, res, next) => {
   try {
     const parsed = reservaBodySchema.parse(req.body);
 
@@ -211,6 +284,60 @@ auditorioRouter.post("/reservas", requireAdminRole, async (req, res, next) => {
 
     return res.status(201).json({
       message: "Reserva de auditorio creada correctamente",
+      reservaId: created.reservaId,
+    });
+  } catch (error) {
+    if (error instanceof z.ZodError) {
+      return res.status(400).json({
+        error: `Payload invalido: ${error.issues[0]?.message ?? "error de validacion"}`,
+      });
+    }
+
+    if (handleKnownAuditorioWriteError(error, res)) {
+      return;
+    }
+
+    return next(error);
+  }
+});
+
+auditorioRouter.post("/public/reservas", async (req, res, next) => {
+  try {
+    const parsed = publicReservaBodySchema.parse(req.body);
+
+    if (parsed.correo.trim().toLowerCase() !== parsed.confirmarCorreo.trim().toLowerCase()) {
+      return res.status(400).json({ error: "Los correos no coinciden." });
+    }
+
+    validatePeriodConsistency(parsed.fechaInicioPeriodo, parsed.fechaFinPeriodo, parsed.horarios);
+    validatePublicAdvanceNotice(parsed.fechaInicioPeriodo, parsed.horarios);
+    validateHorariosNoOverlap(parsed.horarios);
+
+    const created = await createReservaAuditorio({
+      nombreEvento: parsed.nombreEvento,
+      organizador: parsed.correo,
+      fechaInicioPeriodo: toLocalDate(parsed.fechaInicioPeriodo),
+      fechaFinPeriodo: toLocalDate(parsed.fechaFinPeriodo),
+      numeroAsistentes: parsed.numeroAsistentes,
+      requierePantalla: parsed.requierePantalla,
+      requiereSonido: parsed.requiereSonido,
+      requiereMonitor: parsed.requiereMonitor,
+      requiereProyector: parsed.requiereProyector,
+      requiereFiltroAgua: parsed.requiereFiltroAgua,
+      encargadoStaffIds: [],
+      observaciones: parsed.observaciones ?? null,
+      estado: "Pendiente",
+      horarios: parsed.horarios.map((h) => ({
+        fechaEspecifica: toLocalDate(h.fechaEspecifica),
+        horaInicio: h.horaInicio,
+        horaFin: h.horaFin,
+      })),
+    });
+
+    broadcastScheduleRefresh();
+
+    return res.status(201).json({
+      message: "Solicitud de reserva creada correctamente",
       reservaId: created.reservaId,
     });
   } catch (error) {

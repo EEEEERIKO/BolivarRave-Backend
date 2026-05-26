@@ -106,6 +106,7 @@ const PUBLIC_API_PATHS = new Set([
   "/ws-status",
   "/staff/login",
   "/schedules/state",
+  "/auditorio/public/reservas",
 ]);
 
 app.use("/api", (req, res, next) => {
