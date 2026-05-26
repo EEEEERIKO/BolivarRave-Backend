@@ -253,7 +253,7 @@ const isWithinRange = (startTime: string, endTime: string, currentMinutes: numbe
   return Number.isFinite(start) && Number.isFinite(end) && start <= currentMinutes && currentMinutes < end;
 };
 
-const findActiveJornada = (jornadas: StaffLiveScheduleItem[], currentMinutes: number) =>
+const findActiveLiveJornada = (jornadas: StaffLiveScheduleItem[], currentMinutes: number) =>
   jornadas.find((jornada) => isWithinRange(jornada.horaEntrada, jornada.horaSalida, currentMinutes)) ?? null;
 
 const isInActivePause = (pausas: StaffLivePauseItem[], currentMinutes: number, currentDayKey: string) =>
