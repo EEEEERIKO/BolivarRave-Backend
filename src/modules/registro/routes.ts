@@ -3,6 +3,7 @@ import { z } from "zod";
 import { type AuthenticatedRequest, requireAdminRole } from "../../lib/auth";
 import {
   AttendanceError,
+  getAttendanceDashboard,
   getAttendancePreviewByCedula,
   registerAttendanceEntryByCedula,
   registerAttendanceExitByCedula,
@@ -13,6 +14,19 @@ const cedulaSchema = z.object({
 });
 
 export const registroRouter = Router();
+
+registroRouter.get("/dashboard", requireAdminRole, async (_req, res, next) => {
+  try {
+    const dashboard = await getAttendanceDashboard();
+    return res.json({ dashboard });
+  } catch (error) {
+    if (error instanceof AttendanceError) {
+      return res.status(error.status).json({ error: error.message });
+    }
+
+    return next(error);
+  }
+});
 
 registroRouter.get("/preview", requireAdminRole, async (req, res, next) => {
   try {

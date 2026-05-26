@@ -1,5 +1,5 @@
 import { prisma } from "../../lib/prisma";
-import { getStaffByCedula, getStaffHorarioLaboral, listStaffJornadaSemanal } from "../staff/service";
+import { getStaffByCedula, getStaffHorarioLaboral, listStaff, listStaffJornadaSemanal } from "../staff/service";
 
 const COLOMBIA_TIMEZONE = "America/Bogota";
 
@@ -18,6 +18,38 @@ type AttendanceRawRow = {
   minutos_balance: number;
   created_at: string;
   updated_at: string;
+};
+
+type AttendanceMovementRawRow = {
+  id: string;
+  staff_id: string;
+  nombres: string;
+  apellidos: string;
+  actividad: "Entrada" | "Salida";
+  estado: string;
+  fecha: string;
+  hora: string;
+};
+
+type ActiveStaffRawRow = {
+  id: string;
+  staff_id: string;
+  nombres: string;
+  apellidos: string;
+  rol: string;
+  hora_entrada: string;
+};
+
+type StaffLiveScheduleItem = {
+  diaSemana: string;
+  horaEntrada: string;
+  horaSalida: string;
+};
+
+type StaffLivePauseItem = {
+  diaSemana: string;
+  horaInicio: string;
+  horaFin: string;
 };
 
 export type AttendanceRecord = {
@@ -66,6 +98,48 @@ export type AttendancePreview = {
   mensaje: string;
 };
 
+export type AttendanceMovement = {
+  id: string;
+  staffId: string;
+  nombreCompleto: string;
+  actividad: "Entrada" | "Salida";
+  estado: string;
+  fecha: string;
+  hora: string;
+};
+
+export type ActiveStaffEntry = {
+  id: string;
+  staffId: string;
+  nombreCompleto: string;
+  rol: string;
+  horaEntrada: string;
+};
+
+export type ExpectedStaffEntry = {
+  id: string;
+  staffId: string;
+  nombreCompleto: string;
+  rol: string;
+  horaEntrada: string;
+  horaSalida: string;
+  estadoRegistro: "registrado" | "no registrado";
+};
+
+export type AttendanceDashboard = {
+  fecha: string;
+  horaActual: string;
+  movimientosRecientes: AttendanceMovement[];
+  usuariosActivosAhora: ExpectedStaffEntry[];
+  usuariosRegistradosAhora: ExpectedStaffEntry[];
+  usuariosNoRegistradosAhora: ExpectedStaffEntry[];
+  totalActivosAhora: number;
+  totalRegistradosAhora: number;
+  totalNoRegistradosAhora: number;
+  usuariosActivos: ActiveStaffEntry[];
+  totalPresentes: number;
+};
+
 export class AttendanceError extends Error {
   readonly status: number;
 
@@ -78,16 +152,76 @@ export class AttendanceError extends Error {
 
 let ensureAttendanceSchemaPromise: Promise<void> | null = null;
 
+type TableExistsRow = {
+  exists: boolean;
+};
+
 const ensureAttendanceSchema = async () => {
-  console.log("[registro-schema] Skipping dynamic schema creation (should use migrations)");
+  await prisma.$executeRawUnsafe(`
+    CREATE TABLE IF NOT EXISTS public.staff_registros_asistencia (
+      id uuid PRIMARY KEY DEFAULT gen_random_uuid(),
+      staff_id uuid NOT NULL REFERENCES public.staff(id) ON DELETE CASCADE,
+      jornada_id uuid NOT NULL REFERENCES public.staff_jornada_semanal(id) ON DELETE RESTRICT,
+      fecha date NOT NULL,
+      hora_entrada timestamptz NOT NULL,
+      hora_salida timestamptz,
+      minutos_tarde integer NOT NULL DEFAULT 0,
+      minutos_salida_anticipada integer NOT NULL DEFAULT 0,
+      minutos_balance integer NOT NULL DEFAULT 0,
+      created_at timestamptz NOT NULL DEFAULT now(),
+      updated_at timestamptz NOT NULL DEFAULT now(),
+      CONSTRAINT staff_registros_asistencia_unico_por_jornada UNIQUE (staff_id, jornada_id, fecha)
+    )
+  `);
+
+  await prisma.$executeRawUnsafe(`
+    CREATE INDEX IF NOT EXISTS staff_registros_asistencia_staff_fecha_idx
+    ON public.staff_registros_asistencia (staff_id, fecha DESC, created_at DESC)
+  `);
+
+  await prisma.$executeRawUnsafe(`
+    CREATE INDEX IF NOT EXISTS staff_registros_asistencia_fecha_idx
+    ON public.staff_registros_asistencia (fecha DESC)
+  `);
 };
 
 const ensureAttendanceSchemaReady = async () => {
+  const existsRows = await prisma.$queryRaw<TableExistsRow[]>`
+    SELECT EXISTS (
+      SELECT 1
+      FROM information_schema.tables
+      WHERE table_schema = 'public'
+        AND table_name = 'staff_registros_asistencia'
+    ) AS exists
+  `;
+
+  if (existsRows[0]?.exists) {
+    return;
+  }
+
   if (!ensureAttendanceSchemaPromise) {
-    ensureAttendanceSchemaPromise = ensureAttendanceSchema().catch((error) => {
-      ensureAttendanceSchemaPromise = null;
-      throw error;
-    });
+    ensureAttendanceSchemaPromise = ensureAttendanceSchema()
+      .then(async () => {
+        const verificationRows = await prisma.$queryRaw<TableExistsRow[]>`
+          SELECT EXISTS (
+            SELECT 1
+            FROM information_schema.tables
+            WHERE table_schema = 'public'
+              AND table_name = 'staff_registros_asistencia'
+          ) AS exists
+        `;
+
+        if (!verificationRows[0]?.exists) {
+          throw new AttendanceError(
+            "No se pudo inicializar la tabla de asistencia. Verifica las migraciones o permisos del esquema public.",
+            500,
+          );
+        }
+      })
+      .catch((error) => {
+        ensureAttendanceSchemaPromise = null;
+        throw error;
+      });
   }
 
   await ensureAttendanceSchemaPromise;
@@ -99,6 +233,31 @@ const normalizeText = (value: string) =>
     .replace(/[\u0300-\u036f]/g, "")
     .trim()
     .toLowerCase();
+
+const timeToMinutes = (value: string) => {
+  const [hourText, minuteText] = value.split(":");
+  const hour = Number(hourText);
+  const minute = Number(minuteText);
+
+  if (!Number.isFinite(hour) || !Number.isFinite(minute)) {
+    return Number.NaN;
+  }
+
+  return hour * 60 + minute;
+};
+
+const isWithinRange = (startTime: string, endTime: string, currentMinutes: number) => {
+  const start = timeToMinutes(startTime);
+  const end = timeToMinutes(endTime);
+
+  return Number.isFinite(start) && Number.isFinite(end) && start <= currentMinutes && currentMinutes < end;
+};
+
+const findActiveJornada = (jornadas: StaffLiveScheduleItem[], currentMinutes: number) =>
+  jornadas.find((jornada) => isWithinRange(jornada.horaEntrada, jornada.horaSalida, currentMinutes)) ?? null;
+
+const isInActivePause = (pausas: StaffLivePauseItem[], currentMinutes: number, currentDayKey: string) =>
+  pausas.some((pausa) => normalizeText(pausa.diaSemana) === normalizeText(currentDayKey) && isWithinRange(pausa.horaInicio, pausa.horaFin, currentMinutes));
 
 const DAY_MAP: Record<string, string> = {
   lunes: "Lunes",
@@ -198,7 +357,7 @@ const findActiveJornada = (jornadas: StaffJornada[], currentMinutes: number) => 
   );
 };
 
-const getAttendanceRowsForDate = async (staffId: string, fecha: string) => {
+const getCurrentAttendanceEntry = async (staffId: string, fecha: string) => {
   const rows = await prisma.$queryRaw<AttendanceRawRow[]>`
     SELECT
       id::text AS id,
@@ -221,26 +380,73 @@ const getAttendanceRowsForDate = async (staffId: string, fecha: string) => {
   return mapAttendanceRows(rows);
 };
 
+const isMissingAttendanceTableError = (error: unknown) => {
+  const message = error instanceof Error ? error.message : String(error);
+  const normalized = message.toLowerCase();
+  return normalized.includes("42p01") && normalized.includes("staff_registros_asistencia");
+};
+
+const runAttendanceQueryWithRecovery = async <T>(query: () => Promise<T>): Promise<T> => {
+  try {
+    return await query();
+  } catch (error) {
+    if (!isMissingAttendanceTableError(error)) {
+      throw error;
+    }
+
+    ensureAttendanceSchemaPromise = null;
+    await ensureAttendanceSchemaReady();
+    return query();
+  }
+};
+
+const getAttendanceRowsForDate = async (staffId: string, fecha: string) => {
+  const rows = await runAttendanceQueryWithRecovery(() =>
+    prisma.$queryRaw<AttendanceRawRow[]>`
+      SELECT
+        id::text AS id,
+        staff_id::text AS staff_id,
+        jornada_id::text AS jornada_id,
+        TO_CHAR(fecha, 'YYYY-MM-DD') AS fecha,
+        TO_CHAR(hora_entrada, 'YYYY-MM-DD"T"HH24:MI:SS.MS"Z"') AS hora_entrada,
+        TO_CHAR(hora_salida, 'YYYY-MM-DD"T"HH24:MI:SS.MS"Z"') AS hora_salida,
+        minutos_tarde,
+        minutos_salida_anticipada,
+        minutos_balance,
+        TO_CHAR(created_at, 'YYYY-MM-DD"T"HH24:MI:SS.MS"Z"') AS created_at,
+        TO_CHAR(updated_at, 'YYYY-MM-DD"T"HH24:MI:SS.MS"Z"') AS updated_at
+      FROM public.staff_registros_asistencia
+      WHERE staff_id = ${staffId}::uuid
+        AND fecha = ${fecha}::date
+      ORDER BY created_at DESC, id DESC
+    `,
+  );
+
+  return mapAttendanceRows(rows);
+};
+
 const getAttendanceRowByJornada = async (staffId: string, fecha: string, jornadaId: string) => {
-  const rows = await prisma.$queryRaw<AttendanceRawRow[]>`
-    SELECT
-      id::text AS id,
-      staff_id::text AS staff_id,
-      jornada_id::text AS jornada_id,
-      TO_CHAR(fecha, 'YYYY-MM-DD') AS fecha,
-      TO_CHAR(hora_entrada, 'YYYY-MM-DD"T"HH24:MI:SS.MS"Z"') AS hora_entrada,
-      TO_CHAR(hora_salida, 'YYYY-MM-DD"T"HH24:MI:SS.MS"Z"') AS hora_salida,
-      minutos_tarde,
-      minutos_salida_anticipada,
-      minutos_balance,
-      TO_CHAR(created_at, 'YYYY-MM-DD"T"HH24:MI:SS.MS"Z"') AS created_at,
-      TO_CHAR(updated_at, 'YYYY-MM-DD"T"HH24:MI:SS.MS"Z"') AS updated_at
-    FROM public.staff_registros_asistencia
-    WHERE staff_id = ${staffId}::uuid
-      AND fecha = ${fecha}::date
-      AND jornada_id = ${jornadaId}::uuid
-    LIMIT 1
-  `;
+  const rows = await runAttendanceQueryWithRecovery(() =>
+    prisma.$queryRaw<AttendanceRawRow[]>`
+      SELECT
+        id::text AS id,
+        staff_id::text AS staff_id,
+        jornada_id::text AS jornada_id,
+        TO_CHAR(fecha, 'YYYY-MM-DD') AS fecha,
+        TO_CHAR(hora_entrada, 'YYYY-MM-DD"T"HH24:MI:SS.MS"Z"') AS hora_entrada,
+        TO_CHAR(hora_salida, 'YYYY-MM-DD"T"HH24:MI:SS.MS"Z"') AS hora_salida,
+        minutos_tarde,
+        minutos_salida_anticipada,
+        minutos_balance,
+        TO_CHAR(created_at, 'YYYY-MM-DD"T"HH24:MI:SS.MS"Z"') AS created_at,
+        TO_CHAR(updated_at, 'YYYY-MM-DD"T"HH24:MI:SS.MS"Z"') AS updated_at
+      FROM public.staff_registros_asistencia
+      WHERE staff_id = ${staffId}::uuid
+        AND fecha = ${fecha}::date
+        AND jornada_id = ${jornadaId}::uuid
+      LIMIT 1
+    `,
+  );
 
   return mapAttendanceRows(rows)[0] ?? null;
 };
@@ -508,5 +714,147 @@ export const registerAttendanceExitByCedula = async (cedula: string, creadoPorSt
         ? `Salida registrada con ${minutesEarly} minuto(s) antes de terminar la jornada.`
         : "Salida registrada correctamente.",
     alerta: minutesEarly > 0 ? `Salida antes de la hora programada por ${minutesEarly} minuto(s).` : null,
+  };
+};
+
+export const getAttendanceDashboard = async (): Promise<AttendanceDashboard> => {
+  await ensureAttendanceSchemaReady();
+
+  const today = getBogotaNow();
+  const staffList = await listStaff();
+
+  const currentWorkingCandidates = await Promise.all(
+    staffList
+      .filter((staff) => staff.estado === "Active")
+      .map(async (staff) => {
+        const horario = await getStaffHorarioLaboral(staff.id);
+        const jornadasDelDia = horario.jornadaSemanal.filter((jornada) => normalizeText(jornada.diaSemana) === normalizeText(today.weekday));
+        const jornadaActiva = findActiveJornada(jornadasDelDia, today.minutes);
+
+        if (!jornadaActiva) {
+          return null;
+        }
+
+        if (isInActivePause(horario.pausasProgramadas, today.minutes, today.weekday)) {
+          return null;
+        }
+
+        const recordsToday = await getCurrentAttendanceEntry(staff.id, today.dateKey);
+        const registroAbierto = recordsToday.find((registro) => registro.horaEntrada && !registro.horaSalida) ?? null;
+
+        return {
+          id: staff.id,
+          staffId: staff.id,
+          nombreCompleto: `${staff.nombres} ${staff.apellidos}`.trim(),
+          rol: staff.rol,
+          horaEntrada: jornadaActiva.horaEntrada,
+          horaSalida: jornadaActiva.horaSalida,
+          estadoRegistro: registroAbierto ? ("registrado" as const) : ("no registrado" as const),
+        };
+      })
+  );
+
+  const usuariosActivosAhora = currentWorkingCandidates.filter((entry): entry is ExpectedStaffEntry => entry !== null);
+  const usuariosRegistradosAhora = usuariosActivosAhora.filter((entry) => entry.estadoRegistro === "registrado");
+  const usuariosNoRegistradosAhora = usuariosActivosAhora.filter((entry) => entry.estadoRegistro === "no registrado");
+
+  const movementRows = await runAttendanceQueryWithRecovery(() =>
+    prisma.$queryRaw<AttendanceMovementRawRow[]>`
+      SELECT
+        movement.id,
+        movement.staff_id,
+        movement.nombres,
+        movement.apellidos,
+        movement.actividad,
+        movement.estado,
+        movement.fecha,
+        movement.hora
+      FROM (
+        SELECT
+          CONCAT(r.id::text, '-entrada') AS id,
+          s.id::text AS staff_id,
+          s.nombres,
+          s.apellidos,
+          'Entrada'::text AS actividad,
+          CASE
+            WHEN r.minutos_tarde > 0 THEN CONCAT('Tarde (', r.minutos_tarde::text, ' min)')
+            ELSE 'A tiempo'
+          END AS estado,
+          TO_CHAR((r.hora_entrada AT TIME ZONE ${COLOMBIA_TIMEZONE}), 'YYYY-MM-DD') AS fecha,
+          TO_CHAR((r.hora_entrada AT TIME ZONE ${COLOMBIA_TIMEZONE}), 'HH24:MI:SS') AS hora,
+          r.hora_entrada AS momento
+        FROM public.staff_registros_asistencia r
+        INNER JOIN public.staff s ON s.id = r.staff_id
+        WHERE r.hora_entrada IS NOT NULL
+
+        UNION ALL
+
+        SELECT
+          CONCAT(r.id::text, '-salida') AS id,
+          s.id::text AS staff_id,
+          s.nombres,
+          s.apellidos,
+          'Salida'::text AS actividad,
+          CASE
+            WHEN r.minutos_salida_anticipada > 0 THEN CONCAT('Salida anticipada (', r.minutos_salida_anticipada::text, ' min)')
+            ELSE 'Completado'
+          END AS estado,
+          TO_CHAR((r.hora_salida AT TIME ZONE ${COLOMBIA_TIMEZONE}), 'YYYY-MM-DD') AS fecha,
+          TO_CHAR((r.hora_salida AT TIME ZONE ${COLOMBIA_TIMEZONE}), 'HH24:MI:SS') AS hora,
+          r.hora_salida AS momento
+        FROM public.staff_registros_asistencia r
+        INNER JOIN public.staff s ON s.id = r.staff_id
+        WHERE r.hora_salida IS NOT NULL
+      ) AS movement
+      ORDER BY movement.momento DESC
+      LIMIT 30
+    `,
+  );
+
+  const activeRows = await runAttendanceQueryWithRecovery(() =>
+    prisma.$queryRaw<ActiveStaffRawRow[]>`
+      SELECT
+        r.id::text AS id,
+        s.id::text AS staff_id,
+        s.nombres,
+        s.apellidos,
+        sr.nombre AS rol,
+        TO_CHAR((r.hora_entrada AT TIME ZONE ${COLOMBIA_TIMEZONE}), 'HH24:MI:SS') AS hora_entrada
+      FROM public.staff_registros_asistencia r
+      INNER JOIN public.staff s ON s.id = r.staff_id
+      LEFT JOIN public.staff_roles sr ON sr.id = s.role_id
+      WHERE r.fecha = ${today.dateKey}::date
+        AND r.hora_entrada IS NOT NULL
+        AND r.hora_salida IS NULL
+      ORDER BY r.hora_entrada DESC
+    `,
+  );
+
+  return {
+    fecha: today.dateKey,
+    horaActual: today.timeKey,
+    movimientosRecientes: movementRows.map((row) => ({
+      id: row.id,
+      staffId: row.staff_id,
+      nombreCompleto: `${row.nombres} ${row.apellidos}`.trim(),
+      actividad: row.actividad,
+      estado: row.estado,
+      fecha: row.fecha,
+      hora: row.hora,
+    })),
+    usuariosActivos: activeRows.map((row) => ({
+      id: row.id,
+      staffId: row.staff_id,
+      nombreCompleto: `${row.nombres} ${row.apellidos}`.trim(),
+      rol: row.rol || "Colaborador",
+      horaEntrada: row.hora_entrada,
+    })),
+    totalPresentes: activeRows.length,
+    usuariosActivosAhora,
+    usuariosRegistradosAhora,
+    usuariosNoRegistradosAhora,
+    totalActivosAhora: usuariosActivosAhora.length,
+    totalRegistradosAhora: usuariosRegistradosAhora.length,
+    totalNoRegistradosAhora: usuariosNoRegistradosAhora.length,
   };
 };
