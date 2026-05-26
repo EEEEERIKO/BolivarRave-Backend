@@ -144,6 +144,84 @@ const ensureAuditorioEncargadosTableReady = async () => {
   await ensureAuditorioEncargadosTablePromise;
 };
 
+// Table to keep pending admin approval records for public auditorio reservas
+let ensureAuditorioPendingTablePromise: Promise<void> | null = null;
+
+const ensureAuditorioPendingTableReady = async () => {
+  if (!ensureAuditorioPendingTablePromise) {
+    ensureAuditorioPendingTablePromise = (async () => {
+      await prisma.$executeRawUnsafe(`
+        CREATE TABLE IF NOT EXISTS public.auditorio_reserva_solicitudes (
+          id uuid PRIMARY KEY DEFAULT gen_random_uuid(),
+          reserva_id uuid NOT NULL REFERENCES public.reservas_auditorio(id) ON DELETE CASCADE,
+          estado text NOT NULL DEFAULT 'pendiente',
+          solicitado_por_staff_id uuid NULL REFERENCES public.staff(id) ON DELETE SET NULL,
+          solicitado_por_nombre text NULL,
+          solicitado_por_rol text NULL,
+          resuelto_por_staff_id uuid NULL REFERENCES public.staff(id) ON DELETE SET NULL,
+          resuelto_por_nombre text NULL,
+          resuelto_en timestamptz NULL,
+          created_at timestamptz NOT NULL DEFAULT now(),
+          updated_at timestamptz NOT NULL DEFAULT now(),
+          CONSTRAINT auditorio_reserva_solicitudes_reserva_uq UNIQUE (reserva_id)
+        );
+
+        CREATE INDEX IF NOT EXISTS idx_auditorio_reserva_solicitudes_reserva_id
+          ON public.auditorio_reserva_solicitudes(reserva_id);
+
+        CREATE INDEX IF NOT EXISTS idx_auditorio_reserva_solicitudes_estado
+          ON public.auditorio_reserva_solicitudes(estado);
+      `);
+    })().catch((error) => {
+      ensureAuditorioPendingTablePromise = null;
+      throw error;
+    });
+  }
+
+  await ensureAuditorioPendingTablePromise;
+};
+
+export const createPendingAuditorioSolicitud = async (
+  reservaId: string,
+  requestedByName?: string | null,
+  requestedByRole?: string | null,
+  requestedByStaffId?: string | null
+) => {
+  await ensureAuditorioPendingTableReady();
+
+  await prisma.$executeRawUnsafe(
+    `
+    INSERT INTO public.auditorio_reserva_solicitudes (
+      reserva_id,
+      estado,
+      solicitado_por_staff_id,
+      solicitado_por_nombre,
+      solicitado_por_rol,
+      updated_at
+    )
+    VALUES (
+      $1::uuid,
+      'pendiente',
+      $2::uuid,
+      $3,
+      $4,
+      now()
+    )
+    ON CONFLICT (reserva_id) DO UPDATE SET
+      estado = EXCLUDED.estado,
+      solicitado_por_staff_id = EXCLUDED.solicitado_por_staff_id,
+      solicitado_por_nombre = EXCLUDED.solicitado_por_nombre,
+      solicitado_por_rol = EXCLUDED.solicitado_por_rol,
+      updated_at = now()
+  `,
+    reservaId,
+    requestedByStaffId ?? null,
+    requestedByName ?? null,
+    requestedByRole ?? null
+  );
+};
+
+
 const syncReservaEncargadosTx = async (
   tx: Pick<typeof prisma, "$queryRaw" | "$executeRaw">,
   reservaId: string,

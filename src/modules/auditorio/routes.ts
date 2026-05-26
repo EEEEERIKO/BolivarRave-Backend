@@ -5,6 +5,7 @@ import { broadcastScheduleRefresh } from "../../lib/websocket";
 import {
   buildReservasAuditorioHistoryExcel,
   createReservaAuditorio,
+  createPendingAuditorioSolicitud,
   deleteReservaAuditorio,
   listUpcomingAuditorioNotifications,
   listReservasAuditorio,
@@ -279,6 +280,14 @@ auditorioRouter.post("/reservas", async (req, res, next) => {
         horaFin: h.horaFin,
       })),
     });
+
+    // Create an admin notification record so admins see the pending request immediately
+    try {
+      await createPendingAuditorioSolicitud(created.reservaId, parsed.correo ?? null, "public", null);
+    } catch (e) {
+      // Non-fatal: if notification creation fails, proceed but log error
+      console.error("Failed to create pending auditorio solicitud:", e);
+    }
 
     broadcastScheduleRefresh();
 
