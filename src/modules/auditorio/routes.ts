@@ -284,8 +284,6 @@ auditorioRouter.post("/reservas", async (req, res, next) => {
       requiereMonitor: parsed.requiereMonitor,
       requiereProyector: parsed.requiereProyector,
       requiereFiltroAgua: parsed.requiereFiltroAgua,
-      solicitanteNombre: parsed.solicitanteNombre ?? null,
-      solicitanteTelefono: parsed.solicitanteTelefono ?? null,
       encargadoStaffIds: Array.from(new Set(parsed.encargadoStaffIds)),
       observaciones: parsed.observaciones ?? null,
       estado: parsed.estado as AuditorioEstado,

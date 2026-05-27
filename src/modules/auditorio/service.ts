@@ -334,6 +334,8 @@ export const listReservasAuditorio = async () => {
     requiere_proyector: boolean;
     requiere_filtro_agua: boolean;
     observaciones: string | null;
+    solicitante_nombre: string | null;
+    solicitante_telefono: string | null;
     estado: AuditorioEstado;
     fecha_creacion: string;
     horario_id: string | null;
@@ -391,6 +393,8 @@ export const listReservasAuditorio = async () => {
     requiereProyector: boolean;
     requiereFiltroAgua: boolean;
     observaciones: string | null;
+    solicitanteNombre?: string | null;
+    solicitanteTelefono?: string | null;
     estado: AuditorioEstado;
     fechaCreacion: string;
     encargados: AuditorioEncargado[];

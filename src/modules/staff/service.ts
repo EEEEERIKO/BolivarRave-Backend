@@ -138,7 +138,7 @@ export type StaffLoginPortal = "admin-monitor" | "colaborador";
 export type StaffLoginResult = {
   staffId: string;
   cedula: string;
-  role: "admin" | "monitor" | "colaborador";
+  role: "admin" | "monitor" | "colaborador" | "registro";
   roleLabel: string;
   name: string;
 };
