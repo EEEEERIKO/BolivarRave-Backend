@@ -156,7 +156,8 @@ export class StaffAuthError extends Error {
 let ensureStaffHorarioLaboralSchemaPromise: Promise<void> | null = null;
 let ensureStaffSecuritySchemaPromise: Promise<void> | null = null;
 const scryptAsync = promisify(scryptCallback);
-const CREDENTIAL_REQUIRED_ROLE_IDS = new Set([1, 2]);
+// role ids: 1 = admin, 2 = monitor, 3 = colaborador, 4 = registro
+const CREDENTIAL_REQUIRED_ROLE_IDS = new Set([1, 2, 4]);
 
 const ensureStaffHorarioLaboralSchema = async () => {
   // These tables should be created by migrations
@@ -231,6 +232,7 @@ const verifyPasswordHash = async (plainPassword: string, storedHash: string) => 
 const mapRoleFromRoleId = (roleId: number): StaffLoginResult["role"] => {
   if (roleId === 1) return "admin";
   if (roleId === 2) return "monitor";
+  if (roleId === 4) return "registro";
   return "colaborador";
 };
 

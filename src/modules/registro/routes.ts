@@ -1,6 +1,6 @@
 import { Router } from "express";
 import { z } from "zod";
-import { type AuthenticatedRequest, requireAdminRole } from "../../lib/auth";
+import { type AuthenticatedRequest, requireAdminOrRegistroRole } from "../../lib/auth";
 import {
   AttendanceError,
   getAttendanceDashboard,
@@ -15,7 +15,7 @@ const cedulaSchema = z.object({
 
 export const registroRouter = Router();
 
-registroRouter.get("/dashboard", requireAdminRole, async (_req, res, next) => {
+registroRouter.get("/dashboard", requireAdminOrRegistroRole, async (_req, res, next) => {
   try {
     const dashboard = await getAttendanceDashboard();
     return res.json({ dashboard });
@@ -28,7 +28,7 @@ registroRouter.get("/dashboard", requireAdminRole, async (_req, res, next) => {
   }
 });
 
-registroRouter.get("/preview", requireAdminRole, async (req, res, next) => {
+registroRouter.get("/preview", requireAdminOrRegistroRole, async (req, res, next) => {
   try {
     const { cedula } = cedulaSchema.parse(req.query);
     const preview = await getAttendancePreviewByCedula(cedula);
@@ -48,7 +48,7 @@ registroRouter.get("/preview", requireAdminRole, async (req, res, next) => {
   }
 });
 
-registroRouter.post("/entrada", requireAdminRole, async (req, res, next) => {
+registroRouter.post("/entrada", requireAdminOrRegistroRole, async (req, res, next) => {
   try {
     const { cedula } = cedulaSchema.parse(req.body);
     const authUser = (req as AuthenticatedRequest).authUser;
@@ -69,7 +69,7 @@ registroRouter.post("/entrada", requireAdminRole, async (req, res, next) => {
   }
 });
 
-registroRouter.post("/salida", requireAdminRole, async (req, res, next) => {
+registroRouter.post("/salida", requireAdminOrRegistroRole, async (req, res, next) => {
   try {
     const { cedula } = cedulaSchema.parse(req.body);
     const authUser = (req as AuthenticatedRequest).authUser;

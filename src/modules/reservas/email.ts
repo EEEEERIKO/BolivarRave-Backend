@@ -1,6 +1,6 @@
-import { getResendClient } from "../../lib/resend";
+import { Resend } from "resend";
 
-const resend = getResendClient();
+const resend = new Resend(process.env.RESEND_API_KEY);
 
 export interface ReservationEmailData {
   id: string;
@@ -385,7 +385,7 @@ const buildEmailHtml = (data: ReservationEmailData): string => {
       </div>
 
       <div class="footer">
-        <p><strong>Universidad Autónoma de Nayarit (UNAC)</strong></p>
+        <p><strong>Corporación Universitaria Adventista de Colombia (UNAC)</strong></p>
         <p>Administración del Edificio Bolívar Rave</p>
         
         <div class="footer-links">
@@ -405,11 +405,6 @@ const buildEmailHtml = (data: ReservationEmailData): string => {
 
 export const sendReservationConfirmationEmail = async (data: ReservationEmailData): Promise<{ success: boolean; error?: string }> => {
   try {
-    if (!resend || !process.env.RESEND_API_KEY) {
-      console.warn(`RESEND_API_KEY no configurada; correo omitido para reservation ${data.id}`);
-      return { success: false, error: "RESEND_API_KEY no configurada" };
-    }
-
     if (!data.requesterEmail) {
       console.warn(`No email provided for reservation ${data.id}`);
       return { success: false, error: "No email provided" };
@@ -429,7 +424,6 @@ export const sendReservationConfirmationEmail = async (data: ReservationEmailDat
       return { success: false, error: response.error.message };
     }
 
-    console.log(`Email sent successfully for reservation ${data.id} to ${data.requesterEmail}`);
     console.log(`Email sent successfully for reservation ${data.id}`);
     return { success: true };
   } catch (error) {
