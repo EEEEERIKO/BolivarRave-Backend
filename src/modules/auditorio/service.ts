@@ -1,4 +1,5 @@
 import { prisma } from "../../lib/prisma";
+import type { AuditorioReservaEmailData } from "./email";
 import * as XLSX from "xlsx";
 
 export type AuditorioEstado = "Pendiente" | "Aprobada" | "Cancelada";
@@ -834,6 +835,109 @@ export const listUpcomingAuditorioNotifications = async (
         assignedWorkers: encargadosByReserva.get(row.reserva_id) ?? [],
       };
     });
+};
+
+export const getAuditorioReservaEmailDataById = async (id: string): Promise<AuditorioReservaEmailData | null> => {
+  await ensureAuditorioRequesterColumnsReady();
+
+  const requerimientosColumns = await getAuditorioRequerimientosColumns();
+  const monitorSelect = requerimientosColumns.requiereMonitor
+    ? `r.${quoteIdentifier(requerimientosColumns.requiereMonitor)} AS requiere_monitor,`
+    : "false AS requiere_monitor,";
+  const proyectorSelect = requerimientosColumns.requiereProyector
+    ? `r.${quoteIdentifier(requerimientosColumns.requiereProyector)} AS requiere_proyector,`
+    : "false AS requiere_proyector,";
+  const filtroAguaSelect = requerimientosColumns.requiereFiltroAgua
+    ? `r.${quoteIdentifier(requerimientosColumns.requiereFiltroAgua)} AS requiere_filtro_agua,`
+    : "false AS requiere_filtro_agua,";
+
+  const safeId = id.replace(/'/g, "''");
+
+  const rows = await prisma.$queryRawUnsafe<Array<{
+    reserva_id: string;
+    nombre_evento: string;
+    organizador: string;
+    fecha_inicio_periodo: string;
+    fecha_fin_periodo: string;
+    numero_asistentes: number;
+    requiere_pantalla: boolean;
+    requiere_sonido: boolean;
+    requiere_monitor: boolean;
+    requiere_proyector: boolean;
+    requiere_filtro_agua: boolean;
+    observaciones: string | null;
+    solicitante_nombre: string | null;
+    solicitante_telefono: string | null;
+    horario_id: string | null;
+    fecha_especifica: string | null;
+    hora_inicio: string | null;
+    hora_fin: string | null;
+  }>>(
+    `
+    SELECT
+      r.id::text AS reserva_id,
+      r.nombre_evento,
+      r.organizador,
+      TO_CHAR(r.fecha_inicio_periodo, 'YYYY-MM-DD') AS fecha_inicio_periodo,
+      TO_CHAR(r.fecha_fin_periodo, 'YYYY-MM-DD') AS fecha_fin_periodo,
+      r.numero_asistentes,
+      r.requiere_pantalla,
+      r.requiere_sonido,
+      ${monitorSelect}
+      ${proyectorSelect}
+      ${filtroAguaSelect}
+      r.observaciones,
+      COALESCE(r.solicitante_nombre, s.solicitado_por_nombre) AS solicitante_nombre,
+      COALESCE(r.solicitante_telefono, s.solicitado_por_telefono) AS solicitante_telefono,
+      h.id::text AS horario_id,
+      CASE WHEN h.fecha_especifica IS NULL THEN NULL ELSE TO_CHAR(h.fecha_especifica, 'YYYY-MM-DD') END AS fecha_especifica,
+      CASE WHEN h.hora_inicio IS NULL THEN NULL ELSE TO_CHAR(h.hora_inicio, 'HH24:MI') END AS hora_inicio,
+      CASE WHEN h.hora_fin IS NULL THEN NULL ELSE TO_CHAR(h.hora_fin, 'HH24:MI') END AS hora_fin
+    FROM public.reservas_auditorio r
+    LEFT JOIN public.auditorio_reserva_solicitudes s ON s.reserva_id = r.id
+    LEFT JOIN public.horarios_intercalados_auditorio h ON h.reserva_id = r.id
+    WHERE r.id = '${safeId}'::uuid
+    ORDER BY h.fecha_especifica ASC NULLS LAST, h.hora_inicio ASC NULLS LAST
+  `
+  );
+
+  if (rows.length === 0) {
+    return null;
+  }
+
+  const horarios = rows
+    .filter((row) => row.horario_id && row.fecha_especifica && row.hora_inicio && row.hora_fin)
+    .map((row) => ({
+      fechaEspecifica: row.fecha_especifica as string,
+      horaInicio: row.hora_inicio as string,
+      horaFin: row.hora_fin as string,
+    }));
+
+  const firstRow = rows[0];
+  if (!firstRow) {
+    return null;
+  }
+  const requesterEmail = firstRow.organizador;
+
+  return {
+    reservaId: firstRow.reserva_id,
+    requesterName: firstRow.solicitante_nombre ?? firstRow.organizador,
+    requesterEmail,
+    requesterPhone: firstRow.solicitante_telefono ?? null,
+    eventName: firstRow.nombre_evento,
+    periodStart: firstRow.fecha_inicio_periodo,
+    periodEnd: firstRow.fecha_fin_periodo,
+    attendees: Number(firstRow.numero_asistentes ?? 0),
+    resources: [
+      firstRow.requiere_pantalla ? "Pantalla" : null,
+      firstRow.requiere_sonido ? "Sonido" : null,
+      firstRow.requiere_monitor ? "Monitor" : null,
+      firstRow.requiere_proyector ? "Proyector" : null,
+      firstRow.requiere_filtro_agua ? "Filtro de agua" : null,
+    ].filter((value): value is string => Boolean(value)),
+    notes: firstRow.observaciones,
+    horarios,
+  };
 };
 
 export const listPendingAuditorioNotifications = async (): Promise<PendingAuditorioNotification[]> => {
