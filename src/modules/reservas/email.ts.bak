@@ -341,7 +341,7 @@ const buildEmailHtml = (data: ReservationEmailData): string => {
       </div>
 
       <div class="footer">
-        <p><strong>Universidad Autónoma de Nayarit (UNAC)</strong></p>
+        <p><strong>Corporación Universitaria Adventista de Colombia(UNAC)</strong></p>
         <p>Administración del Edificio Bolívar Rave</p>
         <p>Este es un correo automático. Por favor, no responda a este mensaje.</p>
         <p>&copy; 2026 UNAC. Todos los derechos reservados.</p>

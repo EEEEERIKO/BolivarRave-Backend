@@ -14,6 +14,7 @@ import {
   getStaffHorarioLaboral,
   getStaffResumenContrato,
   getStaffById,
+  getStaffByCedula,
   listStaffBalanceMovimientos,
   listStaffSkills,
   listAllStaffJornadasSemanales,
@@ -444,6 +445,44 @@ staffRouter.post("/change-password", async (req, res, next) => {
       return res.status(error.status).json({ error: error.message });
     }
 
+    return next(error);
+  }
+});
+
+// Dev helper: create a quick Monitor account for testing. Disabled in production.
+staffRouter.post("/dev/create-monitor", async (req, res, next) => {
+  try {
+    if (process.env.NODE_ENV === "production") {
+      return res.status(404).json({ error: "Not found" });
+    }
+
+    const exists = await getStaffByCedula("Monitor").catch(() => null);
+    if (exists) {
+      return res.json({ message: "Monitor user already exists", staffId: exists.id });
+    }
+
+    const created = await createStaff({
+      roleId: 4,
+      rol: "Registro",
+      nombres: "Monitor",
+      apellidos: "",
+      cedula: "Monitor",
+      telefono: "",
+      fechaNacimiento: new Date("1990-01-01"),
+      carrera: "",
+      tipoContrato: "Plan Monitoria",
+      conocimientoSonido: false,
+      estado: "Active",
+      balanceHoras: 0,
+      password: "Monitor123",
+      habilidadIds: [],
+      bloqueosClase: [],
+    });
+
+    broadcastScheduleRefresh();
+
+    return res.status(201).json({ message: "Monitor created", staffId: created.staffId });
+  } catch (error) {
     return next(error);
   }
 });

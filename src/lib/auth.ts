@@ -5,7 +5,7 @@ import jwt from "jsonwebtoken";
 export type AuthTokenPayload = {
   staffId: string;
   cedula: string;
-  role: "admin" | "monitor" | "colaborador";
+  role: "admin" | "monitor" | "colaborador" | "registro";
   roleLabel: string;
   name: string;
 };
@@ -100,6 +100,20 @@ export const requireAdminOrMonitorRole: RequestHandler = (req, res, next) => {
 
   if (authUser.role !== "admin" && authUser.role !== "monitor") {
     return res.status(403).json({ error: "Solo los perfiles Administrador y Monitor pueden realizar esta acción." });
+  }
+
+  return next();
+};
+
+export const requireAdminOrRegistroRole: RequestHandler = (req, res, next) => {
+  const authUser = (req as AuthenticatedRequest).authUser;
+
+  if (!authUser) {
+    return res.status(401).json({ error: "No autorizado" });
+  }
+
+  if (authUser.role !== "admin" && authUser.role !== "registro") {
+    return res.status(403).json({ error: "Solo los perfiles Administrador y Registro pueden realizar esta acción." });
   }
 
   return next();

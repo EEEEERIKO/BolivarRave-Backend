@@ -7,7 +7,6 @@ import {
   createReservaAuditorio,
   createPendingAuditorioSolicitud,
   deleteReservaAuditorio,
-  getAuditorioReservaEmailDataById,
   listPendingAuditorioNotifications,
   listUpcomingAuditorioNotifications,
   listReservasAuditorio,
@@ -15,11 +14,6 @@ import {
   updateReservaAuditorio,
   type AuditorioEstado,
 } from "./service";
-import {
-  sendAuditorioReservaConfirmadaEmail,
-  sendAuditorioReservaRechazadaEmail,
-  sendAuditorioSolicitudRegistradaEmail,
-} from "./email";
 
 export const auditorioRouter = Router();
 
@@ -290,6 +284,8 @@ auditorioRouter.post("/reservas", async (req, res, next) => {
       requiereMonitor: parsed.requiereMonitor,
       requiereProyector: parsed.requiereProyector,
       requiereFiltroAgua: parsed.requiereFiltroAgua,
+      solicitanteNombre: parsed.solicitanteNombre ?? null,
+      solicitanteTelefono: parsed.solicitanteTelefono ?? null,
       encargadoStaffIds: Array.from(new Set(parsed.encargadoStaffIds)),
       observaciones: parsed.observaciones ?? null,
       estado: parsed.estado as AuditorioEstado,
@@ -358,43 +354,11 @@ auditorioRouter.post("/public/reservas", async (req, res, next) => {
 
     // Record pending request so admins are notified immediately regardless event date window
     try {
-      await createPendingAuditorioSolicitud(
-        created.reservaId,
-        parsed.solicitanteNombre ?? parsed.correo ?? null,
-        parsed.solicitanteTelefono ?? null,
-        "public",
-        null
-      );
+      await createPendingAuditorioSolicitud(created.reservaId, parsed.solicitanteNombre ?? parsed.correo ?? null, "public", null);
     } catch (e) {
       // Non-fatal: reservation was created successfully
       console.error("Failed to create pending auditorio solicitud:", e);
     }
-
-    void sendAuditorioSolicitudRegistradaEmail({
-      reservaId: created.reservaId,
-      requesterName: parsed.solicitanteNombre,
-      requesterEmail: parsed.correo,
-      requesterPhone: parsed.solicitanteTelefono ?? null,
-      eventName: parsed.nombreEvento,
-      periodStart: parsed.fechaInicioPeriodo,
-      periodEnd: parsed.fechaFinPeriodo,
-      attendees: parsed.numeroAsistentes,
-      resources: [
-        parsed.requierePantalla ? "Pantalla" : null,
-        parsed.requiereSonido ? "Sonido" : null,
-        parsed.requiereMonitor ? "Monitor" : null,
-        parsed.requiereProyector ? "Proyector" : null,
-        parsed.requiereFiltroAgua ? "Filtro de agua" : null,
-      ].filter((value): value is string => Boolean(value)),
-      notes: parsed.observaciones ?? null,
-      horarios: parsed.horarios.map((h) => ({
-        fechaEspecifica: h.fechaEspecifica,
-        horaInicio: h.horaInicio,
-        horaFin: h.horaFin,
-      })),
-    }).catch((error) => {
-      console.error("Failed to send auditorio registration email:", error);
-    });
 
     broadcastScheduleRefresh();
 
@@ -473,21 +437,7 @@ auditorioRouter.patch("/reservas/:id/estado", requireAdminRole, async (req, res,
     const { id } = idParamsSchema.parse(req.params);
     const { estado } = patchEstadoBodySchema.parse(req.body);
 
-    const emailData = await getAuditorioReservaEmailDataById(id);
-
     const updated = await updateEstadoReservaAuditorio(id, estado);
-
-    if (emailData && estado === "Aprobada") {
-      void sendAuditorioReservaConfirmadaEmail(emailData).catch((error) => {
-        console.error("Failed to send auditorio confirmation email:", error);
-      });
-    }
-
-    if (emailData && estado === "Cancelada") {
-      void sendAuditorioReservaRechazadaEmail(emailData).catch((error) => {
-        console.error("Failed to send auditorio rejection email:", error);
-      });
-    }
 
     broadcastScheduleRefresh();
 
@@ -514,15 +464,7 @@ auditorioRouter.delete("/reservas/:id", requireAdminRole, async (req, res, next)
   try {
     const { id } = idParamsSchema.parse(req.params);
 
-    const emailData = await getAuditorioReservaEmailDataById(id);
-
     const deleted = await deleteReservaAuditorio(id);
-
-    if (emailData) {
-      void sendAuditorioReservaRechazadaEmail(emailData).catch((error) => {
-        console.error("Failed to send auditorio rejection email:", error);
-      });
-    }
 
     broadcastScheduleRefresh();
 
