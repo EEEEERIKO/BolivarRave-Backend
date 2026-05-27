@@ -1,4 +1,5 @@
 import { prisma } from "../../lib/prisma";
+import type { AuditorioReservaEmailData } from "./email";
 import * as XLSX from "xlsx";
 
 export type AuditorioEstado = "Pendiente" | "Aprobada" | "Cancelada";
@@ -12,6 +13,8 @@ export type AuditorioHorarioInput = {
 export type CreateReservaAuditorioInput = {
   nombreEvento: string;
   organizador: string;
+  solicitanteNombre?: string | null;
+  solicitanteTelefono?: string | null;
   fechaInicioPeriodo: Date;
   fechaFinPeriodo: Date;
   numeroAsistentes: number;
@@ -65,7 +68,25 @@ export type UpcomingAuditorioNotification = {
     horaInicio: string;
     horaFin: string;
   }>;
+  solicitanteNombre?: string | null;
+  solicitanteTelefono?: string | null;
   assignedWorkers: AuditorioEncargado[];
+};
+
+export type PendingAuditorioNotification = {
+  id: string;
+  reservaId: string;
+  nombreEvento: string;
+  organizador: string;
+  fechaInicioPeriodo: string;
+  fechaFinPeriodo: string;
+  numeroAsistentes: number;
+  createdAt: string;
+  firstHorarioDate: string | null;
+  firstHorarioStart: string | null;
+  firstHorarioEnd: string | null;
+  solicitanteNombre?: string | null;
+  solicitanteTelefono?: string | null;
 };
 
 type ListUpcomingAuditorioNotificationsOptions = {
@@ -92,6 +113,16 @@ type AuditorioRequerimientosColumns = {
   requiereFiltroAgua: string | null;
 };
 
+type AuditorioRequesterColumns = {
+  solicitanteNombre: string | null;
+  solicitanteTelefono: string | null;
+};
+
+type AuditorioPendingRequesterColumns = {
+  solicitadoPorNombre: string | null;
+  solicitadoPorTelefono: string | null;
+};
+
 const quoteIdentifier = (identifier: string) => `"${identifier.replace(/"/g, '""')}"`;
 
 const pickExistingColumn = (available: Set<string>, candidates: string[]) => {
@@ -115,6 +146,50 @@ const toSqlLocalTimestamp = (value: Date) => {
 };
 
 let ensureAuditorioEncargadosTablePromise: Promise<void> | null = null;
+
+let ensureAuditorioRequesterColumnsPromise: Promise<void> | null = null;
+
+const ensureAuditorioRequesterColumnsReady = async () => {
+  if (!ensureAuditorioRequesterColumnsPromise) {
+    ensureAuditorioRequesterColumnsPromise = (async () => {
+      const columns = await prisma.$queryRaw<Array<{ column_name: string }>>`
+        SELECT column_name
+        FROM information_schema.columns
+        WHERE table_schema = 'public'
+          AND table_name = 'reservas_auditorio'
+      `;
+
+      const available = new Set(columns.map((row) => row.column_name));
+
+      if (!available.has("solicitante_nombre") && available.has("solicitado_nombre")) {
+        await prisma.$executeRawUnsafe(`
+          ALTER TABLE public.reservas_auditorio
+          RENAME COLUMN solicitado_nombre TO solicitante_nombre
+        `);
+      }
+
+      if (!available.has("solicitante_telefono") && available.has("solicitado_telefono")) {
+        await prisma.$executeRawUnsafe(`
+          ALTER TABLE public.reservas_auditorio
+          RENAME COLUMN solicitado_telefono TO solicitante_telefono
+        `);
+      }
+
+      await prisma.$executeRawUnsafe(`
+        ALTER TABLE public.reservas_auditorio
+        ADD COLUMN IF NOT EXISTS solicitante_nombre text NULL;
+
+        ALTER TABLE public.reservas_auditorio
+        ADD COLUMN IF NOT EXISTS solicitante_telefono varchar(60) NULL;
+      `);
+    })().catch((error) => {
+      ensureAuditorioRequesterColumnsPromise = null;
+      throw error;
+    });
+  }
+
+  await ensureAuditorioRequesterColumnsPromise;
+};
 
 const ensureAuditorioEncargadosTableReady = async () => {
   if (!ensureAuditorioEncargadosTablePromise) {
@@ -143,6 +218,93 @@ const ensureAuditorioEncargadosTableReady = async () => {
 
   await ensureAuditorioEncargadosTablePromise;
 };
+
+// Table to keep pending admin approval records for public auditorio reservas
+let ensureAuditorioPendingTablePromise: Promise<void> | null = null;
+
+const ensureAuditorioPendingTableReady = async () => {
+  if (!ensureAuditorioPendingTablePromise) {
+    ensureAuditorioPendingTablePromise = (async () => {
+      await prisma.$executeRawUnsafe(`
+        CREATE TABLE IF NOT EXISTS public.auditorio_reserva_solicitudes (
+          id uuid PRIMARY KEY DEFAULT gen_random_uuid(),
+          reserva_id uuid NOT NULL REFERENCES public.reservas_auditorio(id) ON DELETE CASCADE,
+          estado text NOT NULL DEFAULT 'pendiente',
+          solicitado_por_staff_id uuid NULL REFERENCES public.staff(id) ON DELETE SET NULL,
+          solicitado_por_nombre text NULL,
+          solicitado_por_telefono text NULL,
+          solicitado_por_rol text NULL,
+          resuelto_por_staff_id uuid NULL REFERENCES public.staff(id) ON DELETE SET NULL,
+          resuelto_por_nombre text NULL,
+          resuelto_en timestamptz NULL,
+          created_at timestamptz NOT NULL DEFAULT now(),
+          updated_at timestamptz NOT NULL DEFAULT now(),
+          CONSTRAINT auditorio_reserva_solicitudes_reserva_uq UNIQUE (reserva_id)
+        );
+
+        CREATE INDEX IF NOT EXISTS idx_auditorio_reserva_solicitudes_reserva_id
+          ON public.auditorio_reserva_solicitudes(reserva_id);
+
+        CREATE INDEX IF NOT EXISTS idx_auditorio_reserva_solicitudes_estado
+          ON public.auditorio_reserva_solicitudes(estado);
+
+        ALTER TABLE public.auditorio_reserva_solicitudes
+        ADD COLUMN IF NOT EXISTS solicitado_por_telefono text NULL;
+      `);
+    })().catch((error) => {
+      ensureAuditorioPendingTablePromise = null;
+      throw error;
+    });
+  }
+
+  await ensureAuditorioPendingTablePromise;
+};
+
+export const createPendingAuditorioSolicitud = async (
+  reservaId: string,
+  requestedByName?: string | null,
+  requestedByPhone?: string | null,
+  requestedByRole?: string | null,
+  requestedByStaffId?: string | null
+) => {
+  await ensureAuditorioPendingTableReady();
+
+  await prisma.$executeRawUnsafe(
+    `
+    INSERT INTO public.auditorio_reserva_solicitudes (
+      reserva_id,
+      estado,
+      solicitado_por_staff_id,
+      solicitado_por_nombre,
+      solicitado_por_telefono,
+      solicitado_por_rol,
+      updated_at
+    )
+    VALUES (
+      $1::uuid,
+      'pendiente',
+      $2::uuid,
+      $3,
+      $4,
+      $5,
+      now()
+    )
+    ON CONFLICT (reserva_id) DO UPDATE SET
+      estado = EXCLUDED.estado,
+      solicitado_por_staff_id = EXCLUDED.solicitado_por_staff_id,
+      solicitado_por_nombre = EXCLUDED.solicitado_por_nombre,
+      solicitado_por_telefono = EXCLUDED.solicitado_por_telefono,
+      solicitado_por_rol = EXCLUDED.solicitado_por_rol,
+      updated_at = now()
+  `,
+    reservaId,
+    requestedByStaffId ?? null,
+    requestedByName ?? null,
+  requestedByPhone ?? null,
+    requestedByRole ?? null
+  );
+};
+
 
 const syncReservaEncargadosTx = async (
   tx: Pick<typeof prisma, "$queryRaw" | "$executeRaw">,
@@ -209,10 +371,29 @@ const getAuditorioRequerimientosColumns = async (): Promise<AuditorioRequerimien
   };
 };
 
+const getAuditorioRequesterColumns = async (): Promise<AuditorioRequesterColumns> => {
+  const columns = await prisma.$queryRaw<Array<{ column_name: string }>>`
+    SELECT column_name
+    FROM information_schema.columns
+    WHERE table_schema = 'public'
+      AND table_name = 'reservas_auditorio'
+  `;
+
+  const available = new Set(columns.map((row) => row.column_name));
+
+  return {
+    solicitanteNombre: pickExistingColumn(available, ["solicitante_nombre", "solicitado_nombre"]),
+    solicitanteTelefono: pickExistingColumn(available, ["solicitante_telefono", "solicitado_telefono"]),
+  };
+};
+
 export const listReservasAuditorio = async () => {
   await ensureAuditorioEncargadosTableReady();
+  await ensureAuditorioRequesterColumnsReady();
+  await ensureAuditorioPendingTableReady();
 
   const requerimientosColumns = await getAuditorioRequerimientosColumns();
+  const requesterColumns = await getAuditorioRequesterColumns();
   const monitorSelect = requerimientosColumns.requiereMonitor
     ? `r.${quoteIdentifier(requerimientosColumns.requiereMonitor)} AS requiere_monitor,`
     : "false AS requiere_monitor,";
@@ -222,11 +403,19 @@ export const listReservasAuditorio = async () => {
   const filtroAguaSelect = requerimientosColumns.requiereFiltroAgua
     ? `r.${quoteIdentifier(requerimientosColumns.requiereFiltroAgua)} AS requiere_filtro_agua,`
     : "false AS requiere_filtro_agua,";
+  const solicitanteNombreSelect = requesterColumns.solicitanteNombre
+    ? `r.${quoteIdentifier(requesterColumns.solicitanteNombre)} AS solicitante_nombre,`
+    : "NULL AS solicitante_nombre,";
+  const solicitanteTelefonoSelect = requesterColumns.solicitanteTelefono
+    ? `r.${quoteIdentifier(requesterColumns.solicitanteTelefono)} AS solicitante_telefono,`
+    : "NULL AS solicitante_telefono,";
 
   const rows = await prisma.$queryRawUnsafe<Array<{
     id: string;
     nombre_evento: string;
     organizador: string;
+    solicitante_nombre: string | null;
+    solicitante_telefono: string | null;
     fecha_inicio_periodo: string;
     fecha_fin_periodo: string;
     numero_asistentes: number;
@@ -238,6 +427,8 @@ export const listReservasAuditorio = async () => {
     observaciones: string | null;
     estado: AuditorioEstado;
     fecha_creacion: string;
+    solicitud_solicitante_nombre: string | null;
+    solicitud_solicitante_telefono: string | null;
     horario_id: string | null;
     fecha_especifica: string | null;
     hora_inicio: string | null;
@@ -256,9 +447,13 @@ export const listReservasAuditorio = async () => {
       ${monitorSelect}
       ${proyectorSelect}
       ${filtroAguaSelect}
+      ${solicitanteNombreSelect}
+      ${solicitanteTelefonoSelect}
       r.observaciones,
       r.estado,
       TO_CHAR(r.fecha_creacion, 'YYYY-MM-DD"T"HH24:MI:SS.MS"Z"') AS fecha_creacion,
+      COALESCE(s.solicitado_por_nombre, NULL) AS solicitud_solicitante_nombre,
+      COALESCE(s.solicitado_por_telefono, NULL) AS solicitud_solicitante_telefono,
       h.id::text AS horario_id,
       CASE
         WHEN h.fecha_especifica IS NULL THEN NULL
@@ -274,6 +469,7 @@ export const listReservasAuditorio = async () => {
       END AS hora_fin
     FROM public.reservas_auditorio r
     LEFT JOIN public.horarios_intercalados_auditorio h ON h.reserva_id = r.id
+    LEFT JOIN public.auditorio_reserva_solicitudes s ON s.reserva_id = r.id
     ORDER BY r.fecha_creacion DESC, h.fecha_especifica ASC NULLS LAST, h.hora_inicio ASC NULLS LAST
   `
   );
@@ -282,6 +478,8 @@ export const listReservasAuditorio = async () => {
     id: string;
     nombreEvento: string;
     organizador: string;
+    solicitanteNombre: string | null;
+    solicitanteTelefono: string | null;
     fechaInicioPeriodo: string;
     fechaFinPeriodo: string;
     numeroAsistentes: number;
@@ -293,6 +491,8 @@ export const listReservasAuditorio = async () => {
     observaciones: string | null;
     estado: AuditorioEstado;
     fechaCreacion: string;
+    solicitudSolicitanteNombre: string | null;
+    solicitudSolicitanteTelefono: string | null;
     encargados: AuditorioEncargado[];
     horarios: Array<{
       id: string;
@@ -310,6 +510,10 @@ export const listReservasAuditorio = async () => {
         id: row.id,
         nombreEvento: row.nombre_evento,
         organizador: row.organizador,
+        solicitanteNombre: row.solicitante_nombre ?? row.solicitud_solicitante_nombre ?? null,
+        solicitanteTelefono: row.solicitante_telefono ?? row.solicitud_solicitante_telefono ?? null,
+        solicitudSolicitanteNombre: row.solicitud_solicitante_nombre ?? null,
+        solicitudSolicitanteTelefono: row.solicitud_solicitante_telefono ?? null,
         fechaInicioPeriodo: row.fecha_inicio_periodo,
         fechaFinPeriodo: row.fecha_fin_periodo,
         numeroAsistentes: row.numero_asistentes,
@@ -633,9 +837,168 @@ export const listUpcomingAuditorioNotifications = async (
     });
 };
 
+export const getAuditorioReservaEmailDataById = async (id: string): Promise<AuditorioReservaEmailData | null> => {
+  await ensureAuditorioRequesterColumnsReady();
+
+  const requerimientosColumns = await getAuditorioRequerimientosColumns();
+  const monitorSelect = requerimientosColumns.requiereMonitor
+    ? `r.${quoteIdentifier(requerimientosColumns.requiereMonitor)} AS requiere_monitor,`
+    : "false AS requiere_monitor,";
+  const proyectorSelect = requerimientosColumns.requiereProyector
+    ? `r.${quoteIdentifier(requerimientosColumns.requiereProyector)} AS requiere_proyector,`
+    : "false AS requiere_proyector,";
+  const filtroAguaSelect = requerimientosColumns.requiereFiltroAgua
+    ? `r.${quoteIdentifier(requerimientosColumns.requiereFiltroAgua)} AS requiere_filtro_agua,`
+    : "false AS requiere_filtro_agua,";
+
+  const safeId = id.replace(/'/g, "''");
+
+  const rows = await prisma.$queryRawUnsafe<Array<{
+    reserva_id: string;
+    nombre_evento: string;
+    organizador: string;
+    fecha_inicio_periodo: string;
+    fecha_fin_periodo: string;
+    numero_asistentes: number;
+    requiere_pantalla: boolean;
+    requiere_sonido: boolean;
+    requiere_monitor: boolean;
+    requiere_proyector: boolean;
+    requiere_filtro_agua: boolean;
+    observaciones: string | null;
+    solicitante_nombre: string | null;
+    solicitante_telefono: string | null;
+    horario_id: string | null;
+    fecha_especifica: string | null;
+    hora_inicio: string | null;
+    hora_fin: string | null;
+  }>>(
+    `
+    SELECT
+      r.id::text AS reserva_id,
+      r.nombre_evento,
+      r.organizador,
+      TO_CHAR(r.fecha_inicio_periodo, 'YYYY-MM-DD') AS fecha_inicio_periodo,
+      TO_CHAR(r.fecha_fin_periodo, 'YYYY-MM-DD') AS fecha_fin_periodo,
+      r.numero_asistentes,
+      r.requiere_pantalla,
+      r.requiere_sonido,
+      ${monitorSelect}
+      ${proyectorSelect}
+      ${filtroAguaSelect}
+      r.observaciones,
+      COALESCE(r.solicitante_nombre, s.solicitado_por_nombre) AS solicitante_nombre,
+      COALESCE(r.solicitante_telefono, s.solicitado_por_telefono) AS solicitante_telefono,
+      h.id::text AS horario_id,
+      CASE WHEN h.fecha_especifica IS NULL THEN NULL ELSE TO_CHAR(h.fecha_especifica, 'YYYY-MM-DD') END AS fecha_especifica,
+      CASE WHEN h.hora_inicio IS NULL THEN NULL ELSE TO_CHAR(h.hora_inicio, 'HH24:MI') END AS hora_inicio,
+      CASE WHEN h.hora_fin IS NULL THEN NULL ELSE TO_CHAR(h.hora_fin, 'HH24:MI') END AS hora_fin
+    FROM public.reservas_auditorio r
+    LEFT JOIN public.auditorio_reserva_solicitudes s ON s.reserva_id = r.id
+    LEFT JOIN public.horarios_intercalados_auditorio h ON h.reserva_id = r.id
+    WHERE r.id = '${safeId}'::uuid
+    ORDER BY h.fecha_especifica ASC NULLS LAST, h.hora_inicio ASC NULLS LAST
+  `
+  );
+
+  if (rows.length === 0) {
+    return null;
+  }
+
+  const horarios = rows
+    .filter((row) => row.horario_id && row.fecha_especifica && row.hora_inicio && row.hora_fin)
+    .map((row) => ({
+      fechaEspecifica: row.fecha_especifica as string,
+      horaInicio: row.hora_inicio as string,
+      horaFin: row.hora_fin as string,
+    }));
+
+  const firstRow = rows[0];
+  if (!firstRow) {
+    return null;
+  }
+  const requesterEmail = firstRow.organizador;
+
+  return {
+    reservaId: firstRow.reserva_id,
+    requesterName: firstRow.solicitante_nombre ?? firstRow.organizador,
+    requesterEmail,
+    requesterPhone: firstRow.solicitante_telefono ?? null,
+    eventName: firstRow.nombre_evento,
+    periodStart: firstRow.fecha_inicio_periodo,
+    periodEnd: firstRow.fecha_fin_periodo,
+    attendees: Number(firstRow.numero_asistentes ?? 0),
+    resources: [
+      firstRow.requiere_pantalla ? "Pantalla" : null,
+      firstRow.requiere_sonido ? "Sonido" : null,
+      firstRow.requiere_monitor ? "Monitor" : null,
+      firstRow.requiere_proyector ? "Proyector" : null,
+      firstRow.requiere_filtro_agua ? "Filtro de agua" : null,
+    ].filter((value): value is string => Boolean(value)),
+    notes: firstRow.observaciones,
+    horarios,
+  };
+};
+
+export const listPendingAuditorioNotifications = async (): Promise<PendingAuditorioNotification[]> => {
+  const rows = await prisma.$queryRaw<Array<{
+    reserva_id: string;
+    nombre_evento: string;
+    organizador: string;
+    fecha_inicio_periodo: string;
+    fecha_fin_periodo: string;
+    numero_asistentes: number;
+    created_at: string;
+    first_horario_date: string | null;
+    first_horario_start: string | null;
+    first_horario_end: string | null;
+  }>>`
+    SELECT
+      r.id::text AS reserva_id,
+      r.nombre_evento,
+      r.organizador,
+      TO_CHAR(r.fecha_inicio_periodo, 'YYYY-MM-DD') AS fecha_inicio_periodo,
+      TO_CHAR(r.fecha_fin_periodo, 'YYYY-MM-DD') AS fecha_fin_periodo,
+      r.numero_asistentes,
+      TO_CHAR(r.fecha_creacion, 'YYYY-MM-DD"T"HH24:MI:SS.MS"Z"') AS created_at,
+      CASE WHEN h.fecha_especifica IS NULL THEN NULL ELSE TO_CHAR(h.fecha_especifica, 'YYYY-MM-DD') END AS first_horario_date,
+      CASE WHEN h.hora_inicio IS NULL THEN NULL ELSE TO_CHAR(h.hora_inicio, 'HH24:MI') END AS first_horario_start,
+      CASE WHEN h.hora_fin IS NULL THEN NULL ELSE TO_CHAR(h.hora_fin, 'HH24:MI') END AS first_horario_end
+    FROM public.reservas_auditorio r
+    LEFT JOIN LATERAL (
+      SELECT
+        hi.fecha_especifica,
+        hi.hora_inicio,
+        hi.hora_fin
+      FROM public.horarios_intercalados_auditorio hi
+      WHERE hi.reserva_id = r.id
+      ORDER BY hi.fecha_especifica ASC, hi.hora_inicio ASC
+      LIMIT 1
+    ) h ON TRUE
+    WHERE r.estado = 'Pendiente'::public.auditorio_estado_enum
+    ORDER BY r.fecha_creacion DESC
+    LIMIT 25
+  `;
+
+  return rows.map((row) => ({
+    id: `pending:${row.reserva_id}`,
+    reservaId: row.reserva_id,
+    nombreEvento: row.nombre_evento,
+    organizador: row.organizador,
+    fechaInicioPeriodo: row.fecha_inicio_periodo,
+    fechaFinPeriodo: row.fecha_fin_periodo,
+    numeroAsistentes: Number(row.numero_asistentes ?? 0),
+    createdAt: row.created_at,
+    firstHorarioDate: row.first_horario_date,
+    firstHorarioStart: row.first_horario_start,
+    firstHorarioEnd: row.first_horario_end,
+  }));
+};
+
 export const createReservaAuditorio = async (payload: CreateReservaAuditorioInput) => {
   return prisma.$transaction(async (tx) => {
     await ensureAuditorioEncargadosTableReady();
+    await ensureAuditorioRequesterColumnsReady();
 
     const requerimientosColumns = await getAuditorioRequerimientosColumns();
     const columns = [
@@ -688,6 +1051,19 @@ export const createReservaAuditorio = async (payload: CreateReservaAuditorioInpu
     values.push(`$${params.length + 1}`, `$${params.length + 2}::public.auditorio_estado_enum`);
     params.push(payload.observaciones, payload.estado);
 
+    const requesterColumns = await getAuditorioRequesterColumns();
+    if (requesterColumns.solicitanteNombre) {
+      columns.push(quoteIdentifier(requesterColumns.solicitanteNombre));
+      values.push(`$${params.length + 1}`);
+      params.push(payload.solicitanteNombre ?? null);
+    }
+
+    if (requesterColumns.solicitanteTelefono) {
+      columns.push(quoteIdentifier(requesterColumns.solicitanteTelefono));
+      values.push(`$${params.length + 1}`);
+      params.push(payload.solicitanteTelefono ?? null);
+    }
+
     const reserva = await tx.$queryRawUnsafe<Array<{ id: string }>>(
       `
       INSERT INTO public.reservas_auditorio (
@@ -732,6 +1108,7 @@ export const createReservaAuditorio = async (payload: CreateReservaAuditorioInpu
 export const updateReservaAuditorio = async (payload: UpdateReservaAuditorioInput) => {
   return prisma.$transaction(async (tx) => {
     await ensureAuditorioEncargadosTableReady();
+    await ensureAuditorioRequesterColumnsReady();
 
     const requerimientosColumns = await getAuditorioRequerimientosColumns();
     const assignments = [
@@ -766,6 +1143,17 @@ export const updateReservaAuditorio = async (payload: UpdateReservaAuditorioInpu
     if (requerimientosColumns.requiereFiltroAgua) {
       assignments.push(`${quoteIdentifier(requerimientosColumns.requiereFiltroAgua)} = $${params.length + 1}`);
       params.push(payload.requiereFiltroAgua);
+    }
+
+    const requesterColumns = await getAuditorioRequesterColumns();
+    if (requesterColumns.solicitanteNombre) {
+      assignments.push(`${quoteIdentifier(requesterColumns.solicitanteNombre)} = $${params.length + 1}`);
+      params.push(payload.solicitanteNombre ?? null);
+    }
+
+    if (requesterColumns.solicitanteTelefono) {
+      assignments.push(`${quoteIdentifier(requesterColumns.solicitanteTelefono)} = $${params.length + 1}`);
+      params.push(payload.solicitanteTelefono ?? null);
     }
 
     assignments.push(

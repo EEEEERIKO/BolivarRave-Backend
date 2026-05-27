@@ -5,13 +5,21 @@ import { broadcastScheduleRefresh } from "../../lib/websocket";
 import {
   buildReservasAuditorioHistoryExcel,
   createReservaAuditorio,
+  createPendingAuditorioSolicitud,
   deleteReservaAuditorio,
+  getAuditorioReservaEmailDataById,
+  listPendingAuditorioNotifications,
   listUpcomingAuditorioNotifications,
   listReservasAuditorio,
   updateEstadoReservaAuditorio,
   updateReservaAuditorio,
   type AuditorioEstado,
 } from "./service";
+import {
+  sendAuditorioReservaConfirmadaEmail,
+  sendAuditorioReservaRechazadaEmail,
+  sendAuditorioSolicitudRegistradaEmail,
+} from "./email";
 
 export const auditorioRouter = Router();
 
@@ -37,6 +45,8 @@ const reservaBodySchema = z.object({
   requiereFiltroAgua: z.boolean().default(false),
   encargadoStaffIds: z.array(z.string().uuid()).default([]),
   observaciones: z.string().trim().max(4000).optional().nullable(),
+  solicitanteNombre: z.string().trim().min(1).max(200).optional().nullable(),
+  solicitanteTelefono: z.string().trim().min(5).max(60).optional().nullable(),
   estado: z.enum(["Pendiente", "Aprobada", "Cancelada"]).default("Pendiente"),
   horarios: z.array(horarioSchema).min(1),
 });
@@ -54,6 +64,8 @@ const publicReservaBodySchema = z.object({
   requiereProyector: z.boolean().default(false),
   requiereFiltroAgua: z.boolean().default(false),
   observaciones: z.string().trim().max(4000).optional().nullable(),
+  solicitanteNombre: z.string().trim().min(1).max(200),
+  solicitanteTelefono: z.string().trim().min(5).max(60),
   horarios: z.array(horarioSchema).min(1),
 });
 
@@ -229,10 +241,16 @@ auditorioRouter.get("/public/reservas", async (_req, res, next) => {
 auditorioRouter.get("/notifications/upcoming", requireAuthToken, async (req, res, next) => {
   try {
     const authUser = (req as AuthenticatedRequest).authUser;
-    const notifications = await listUpcomingAuditorioNotifications({
-      assignedStaffId: authUser?.role === "colaborador" ? authUser.staffId : undefined,
-    });
-    return res.json({ notifications });
+    const [notifications, pendingNotifications] = await Promise.all([
+      listUpcomingAuditorioNotifications({
+        assignedStaffId: authUser?.role === "colaborador" ? authUser.staffId : undefined,
+      }),
+      authUser?.role === "admin"
+        ? listPendingAuditorioNotifications()
+        : Promise.resolve([]),
+    ]);
+
+    return res.json({ notifications, pendingNotifications });
   } catch (error) {
     return next(error);
   }
@@ -262,6 +280,8 @@ auditorioRouter.post("/reservas", async (req, res, next) => {
     const created = await createReservaAuditorio({
       nombreEvento: parsed.nombreEvento,
       organizador: parsed.organizador,
+      solicitanteNombre: parsed.solicitanteNombre ?? null,
+      solicitanteTelefono: parsed.solicitanteTelefono ?? null,
       fechaInicioPeriodo: toLocalDate(parsed.fechaInicioPeriodo),
       fechaFinPeriodo: toLocalDate(parsed.fechaFinPeriodo),
       numeroAsistentes: parsed.numeroAsistentes,
@@ -316,6 +336,8 @@ auditorioRouter.post("/public/reservas", async (req, res, next) => {
     const created = await createReservaAuditorio({
       nombreEvento: parsed.nombreEvento,
       organizador: parsed.correo,
+      solicitanteNombre: parsed.solicitanteNombre ?? parsed.correo ?? null,
+      solicitanteTelefono: parsed.solicitanteTelefono ?? null,
       fechaInicioPeriodo: toLocalDate(parsed.fechaInicioPeriodo),
       fechaFinPeriodo: toLocalDate(parsed.fechaFinPeriodo),
       numeroAsistentes: parsed.numeroAsistentes,
@@ -332,6 +354,46 @@ auditorioRouter.post("/public/reservas", async (req, res, next) => {
         horaInicio: h.horaInicio,
         horaFin: h.horaFin,
       })),
+    });
+
+    // Record pending request so admins are notified immediately regardless event date window
+    try {
+      await createPendingAuditorioSolicitud(
+        created.reservaId,
+        parsed.solicitanteNombre ?? parsed.correo ?? null,
+        parsed.solicitanteTelefono ?? null,
+        "public",
+        null
+      );
+    } catch (e) {
+      // Non-fatal: reservation was created successfully
+      console.error("Failed to create pending auditorio solicitud:", e);
+    }
+
+    void sendAuditorioSolicitudRegistradaEmail({
+      reservaId: created.reservaId,
+      requesterName: parsed.solicitanteNombre,
+      requesterEmail: parsed.correo,
+      requesterPhone: parsed.solicitanteTelefono ?? null,
+      eventName: parsed.nombreEvento,
+      periodStart: parsed.fechaInicioPeriodo,
+      periodEnd: parsed.fechaFinPeriodo,
+      attendees: parsed.numeroAsistentes,
+      resources: [
+        parsed.requierePantalla ? "Pantalla" : null,
+        parsed.requiereSonido ? "Sonido" : null,
+        parsed.requiereMonitor ? "Monitor" : null,
+        parsed.requiereProyector ? "Proyector" : null,
+        parsed.requiereFiltroAgua ? "Filtro de agua" : null,
+      ].filter((value): value is string => Boolean(value)),
+      notes: parsed.observaciones ?? null,
+      horarios: parsed.horarios.map((h) => ({
+        fechaEspecifica: h.fechaEspecifica,
+        horaInicio: h.horaInicio,
+        horaFin: h.horaFin,
+      })),
+    }).catch((error) => {
+      console.error("Failed to send auditorio registration email:", error);
     });
 
     broadcastScheduleRefresh();
@@ -411,7 +473,21 @@ auditorioRouter.patch("/reservas/:id/estado", requireAdminRole, async (req, res,
     const { id } = idParamsSchema.parse(req.params);
     const { estado } = patchEstadoBodySchema.parse(req.body);
 
+    const emailData = await getAuditorioReservaEmailDataById(id);
+
     const updated = await updateEstadoReservaAuditorio(id, estado);
+
+    if (emailData && estado === "Aprobada") {
+      void sendAuditorioReservaConfirmadaEmail(emailData).catch((error) => {
+        console.error("Failed to send auditorio confirmation email:", error);
+      });
+    }
+
+    if (emailData && estado === "Cancelada") {
+      void sendAuditorioReservaRechazadaEmail(emailData).catch((error) => {
+        console.error("Failed to send auditorio rejection email:", error);
+      });
+    }
 
     broadcastScheduleRefresh();
 
@@ -438,7 +514,15 @@ auditorioRouter.delete("/reservas/:id", requireAdminRole, async (req, res, next)
   try {
     const { id } = idParamsSchema.parse(req.params);
 
+    const emailData = await getAuditorioReservaEmailDataById(id);
+
     const deleted = await deleteReservaAuditorio(id);
+
+    if (emailData) {
+      void sendAuditorioReservaRechazadaEmail(emailData).catch((error) => {
+        console.error("Failed to send auditorio rejection email:", error);
+      });
+    }
 
     broadcastScheduleRefresh();
 
