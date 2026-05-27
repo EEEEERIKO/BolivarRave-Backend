@@ -7,6 +7,7 @@ import {
   createReservaAuditorio,
   createPendingAuditorioSolicitud,
   deleteReservaAuditorio,
+  listPendingAuditorioNotifications,
   listUpcomingAuditorioNotifications,
   listReservasAuditorio,
   updateEstadoReservaAuditorio,
@@ -38,6 +39,8 @@ const reservaBodySchema = z.object({
   requiereFiltroAgua: z.boolean().default(false),
   encargadoStaffIds: z.array(z.string().uuid()).default([]),
   observaciones: z.string().trim().max(4000).optional().nullable(),
+  solicitanteNombre: z.string().trim().min(1).max(200).optional().nullable(),
+  solicitanteTelefono: z.string().trim().min(5).max(60).optional().nullable(),
   estado: z.enum(["Pendiente", "Aprobada", "Cancelada"]).default("Pendiente"),
   horarios: z.array(horarioSchema).min(1),
 });
@@ -55,6 +58,8 @@ const publicReservaBodySchema = z.object({
   requiereProyector: z.boolean().default(false),
   requiereFiltroAgua: z.boolean().default(false),
   observaciones: z.string().trim().max(4000).optional().nullable(),
+  solicitanteNombre: z.string().trim().min(1).max(200),
+  solicitanteTelefono: z.string().trim().min(5).max(60),
   horarios: z.array(horarioSchema).min(1),
 });
 
@@ -230,10 +235,16 @@ auditorioRouter.get("/public/reservas", async (_req, res, next) => {
 auditorioRouter.get("/notifications/upcoming", requireAuthToken, async (req, res, next) => {
   try {
     const authUser = (req as AuthenticatedRequest).authUser;
-    const notifications = await listUpcomingAuditorioNotifications({
-      assignedStaffId: authUser?.role === "colaborador" ? authUser.staffId : undefined,
-    });
-    return res.json({ notifications });
+    const [notifications, pendingNotifications] = await Promise.all([
+      listUpcomingAuditorioNotifications({
+        assignedStaffId: authUser?.role === "colaborador" ? authUser.staffId : undefined,
+      }),
+      authUser?.role === "admin"
+        ? listPendingAuditorioNotifications()
+        : Promise.resolve([]),
+    ]);
+
+    return res.json({ notifications, pendingNotifications });
   } catch (error) {
     return next(error);
   }
@@ -263,6 +274,8 @@ auditorioRouter.post("/reservas", async (req, res, next) => {
     const created = await createReservaAuditorio({
       nombreEvento: parsed.nombreEvento,
       organizador: parsed.organizador,
+      solicitanteNombre: parsed.solicitanteNombre ?? null,
+      solicitanteTelefono: parsed.solicitanteTelefono ?? null,
       fechaInicioPeriodo: toLocalDate(parsed.fechaInicioPeriodo),
       fechaFinPeriodo: toLocalDate(parsed.fechaFinPeriodo),
       numeroAsistentes: parsed.numeroAsistentes,
@@ -280,14 +293,6 @@ auditorioRouter.post("/reservas", async (req, res, next) => {
         horaFin: h.horaFin,
       })),
     });
-
-    // Create an admin notification record so admins see the pending request immediately
-    try {
-      await createPendingAuditorioSolicitud(created.reservaId, parsed.correo ?? null, "public", null);
-    } catch (e) {
-      // Non-fatal: if notification creation fails, proceed but log error
-      console.error("Failed to create pending auditorio solicitud:", e);
-    }
 
     broadcastScheduleRefresh();
 
@@ -325,6 +330,8 @@ auditorioRouter.post("/public/reservas", async (req, res, next) => {
     const created = await createReservaAuditorio({
       nombreEvento: parsed.nombreEvento,
       organizador: parsed.correo,
+      solicitanteNombre: parsed.solicitanteNombre ?? parsed.correo ?? null,
+      solicitanteTelefono: parsed.solicitanteTelefono ?? null,
       fechaInicioPeriodo: toLocalDate(parsed.fechaInicioPeriodo),
       fechaFinPeriodo: toLocalDate(parsed.fechaFinPeriodo),
       numeroAsistentes: parsed.numeroAsistentes,
@@ -342,6 +349,20 @@ auditorioRouter.post("/public/reservas", async (req, res, next) => {
         horaFin: h.horaFin,
       })),
     });
+
+    // Record pending request so admins are notified immediately regardless event date window
+    try {
+      await createPendingAuditorioSolicitud(
+        created.reservaId,
+        parsed.solicitanteNombre ?? parsed.correo ?? null,
+        parsed.solicitanteTelefono ?? null,
+        "public",
+        null
+      );
+    } catch (e) {
+      // Non-fatal: reservation was created successfully
+      console.error("Failed to create pending auditorio solicitud:", e);
+    }
 
     broadcastScheduleRefresh();
 
