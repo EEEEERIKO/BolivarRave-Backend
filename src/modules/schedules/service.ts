@@ -69,6 +69,23 @@ export type SharedScheduleState = {
   visualAssignments: SharedScheduleVisualAssignment[];
 };
 
+const withTimeout = async <T>(promise: Promise<T>, timeoutMs: number, timeoutMessage: string): Promise<T> => {
+  let timer: NodeJS.Timeout | null = null;
+
+  try {
+    return await Promise.race([
+      promise,
+      new Promise<T>((_resolve, reject) => {
+        timer = setTimeout(() => reject(new Error(timeoutMessage)), timeoutMs);
+      }),
+    ]);
+  } finally {
+    if (timer) {
+      clearTimeout(timer);
+    }
+  }
+};
+
 const ensureImportsHistoryTable = async () => {
   await prisma.$executeRawUnsafe(`
     CREATE TABLE IF NOT EXISTS public.schedule_import_history (
@@ -1867,9 +1884,13 @@ export const getScheduleEvents = async () => {
 };
 
 export const getPendingScheduleRequests = async () => {
-  await ensureScheduleRequestsTableReady();
+  await withTimeout(
+    ensureScheduleRequestsTableReady(),
+    5000,
+    "Prisma schedules requests table bootstrap timeout"
+  );
 
-  const requests = await prisma.$queryRaw<
+  const requests = await withTimeout(prisma.$queryRaw<
     Array<{
       request_id: string;
       event_id: string;
@@ -1915,7 +1936,7 @@ export const getPendingScheduleRequests = async () => {
     LEFT JOIN public.facultades f ON f.id = e.facultad_id
     WHERE sr.estado = 'pendiente'
     ORDER BY sr.id, h.dia_semana, h.hora_inicio
-  `;
+  `, 6000, "Prisma schedules pending requests query timeout");
 
   return requests.map((request) => ({
     id: request.request_id,

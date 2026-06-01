@@ -17,6 +17,22 @@ import {
 
 export const auditorioRouter = Router();
 
+const isPrismaConnectionTimeoutError = (error: unknown) => {
+  if (!error || typeof error !== "object") {
+    return false;
+  }
+
+  const maybeCode = "code" in error ? String((error as { code?: unknown }).code ?? "") : "";
+  const maybeMessage = "message" in error ? String((error as { message?: unknown }).message ?? "").toLowerCase() : "";
+
+  return (
+    maybeCode === "P2028" ||
+    maybeCode === "ETIMEDOUT" ||
+    maybeMessage.includes("timeout") ||
+    maybeMessage.includes("unable to start a transaction")
+  );
+};
+
 const dateRegex = /^\d{4}-\d{2}-\d{2}$/;
 const timeRegex = /^\d{2}:\d{2}$/;
 
@@ -246,6 +262,11 @@ auditorioRouter.get("/notifications/upcoming", requireAuthToken, async (req, res
 
     return res.json({ notifications, pendingNotifications });
   } catch (error) {
+    if (isPrismaConnectionTimeoutError(error)) {
+      // Degrade gracefully when DB connectivity is unstable.
+      return res.json({ notifications: [], pendingNotifications: [] });
+    }
+
     return next(error);
   }
 });

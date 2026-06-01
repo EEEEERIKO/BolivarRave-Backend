@@ -36,11 +36,33 @@ const isProduction = process.env.NODE_ENV === "production";
 
 export const tasksRouter = Router();
 
+const isPrismaConnectionTimeoutError = (error: unknown) => {
+  if (!error || typeof error !== "object") {
+    return false;
+  }
+
+  const maybeCode = "code" in error ? String((error as { code?: unknown }).code ?? "") : "";
+  const maybeMessage = "message" in error ? String((error as { message?: unknown }).message ?? "").toLowerCase() : "";
+
+  return (
+    maybeCode === "P2028" ||
+    maybeCode === "ETIMEDOUT" ||
+    maybeMessage.includes("timeout") ||
+    maybeMessage.includes("unable to start a transaction")
+  );
+};
+
 tasksRouter.use(async (_req, _res, next) => {
   try {
     await ensureTasksSchema();
     return next();
   } catch (error) {
+    if (isPrismaConnectionTimeoutError(error)) {
+      // In unstable DB connectivity scenarios, avoid blocking all task endpoints.
+      // Endpoints that require missing schema will still fail with explicit errors.
+      return next();
+    }
+
     return next(error);
   }
 });

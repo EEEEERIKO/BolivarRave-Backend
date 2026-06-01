@@ -133,6 +133,39 @@ type StaffLoginRawRow = {
   password_hash: string | null;
 };
 
+type StaffLoginRestRow = {
+  id: string;
+  role_id: number;
+  rol: string;
+  nombres: string;
+  apellidos: string;
+  cedula: string;
+  estado: StaffEstado;
+};
+
+type StaffCredentialRestRow = {
+  staff_id: string;
+  password_hash: string | null;
+};
+
+type StaffRestBasicRow = {
+  id: string;
+  numero_staff: number;
+  role_id: number;
+  rol: string;
+  nombres: string;
+  apellidos: string;
+  cedula: string;
+  telefono: string;
+  fecha_nacimiento: string;
+  carrera: string;
+  tipo_contrato: string;
+  conocimiento_sonido: boolean;
+  estado: StaffEstado;
+  balance_horas: number;
+  fecha_creacion: string;
+};
+
 export type StaffLoginPortal = "admin-monitor" | "colaborador";
 
 export type StaffLoginResult = {
@@ -158,6 +191,210 @@ let ensureStaffSecuritySchemaPromise: Promise<void> | null = null;
 const scryptAsync = promisify(scryptCallback);
 // role ids: 1 = admin, 2 = monitor, 3 = colaborador, 4 = registro
 const CREDENTIAL_REQUIRED_ROLE_IDS = new Set([1, 2, 4]);
+const SUPABASE_URL = (process.env.SUPABASE_URL ?? "").trim();
+const SUPABASE_SERVICE_ROLE_KEY = (process.env.SUPABASE_SERVICE_ROLE_KEY ?? "").trim();
+
+const isPrismaConnectionTimeoutError = (error: unknown) => {
+  if (!error || typeof error !== "object") {
+    return false;
+  }
+
+  const maybeCode = "code" in error ? String((error as { code?: unknown }).code ?? "") : "";
+  const maybeMessage = "message" in error ? String((error as { message?: unknown }).message ?? "").toLowerCase() : "";
+
+  return (
+    maybeCode === "P2028" ||
+    maybeCode === "ETIMEDOUT" ||
+    maybeMessage.includes("timeout") ||
+    maybeMessage.includes("unable to start a transaction")
+  );
+};
+
+const withTimeout = async <T>(promise: Promise<T>, timeoutMs: number, timeoutMessage: string): Promise<T> => {
+  let timer: NodeJS.Timeout | null = null;
+
+  try {
+    return await Promise.race([
+      promise,
+      new Promise<T>((_resolve, reject) => {
+        timer = setTimeout(() => {
+          reject(new Error(timeoutMessage));
+        }, timeoutMs);
+      }),
+    ]);
+  } finally {
+    if (timer) {
+      clearTimeout(timer);
+    }
+  }
+};
+
+const fetchSupabaseRestJson = async <T>(path: string): Promise<T> => {
+  if (!SUPABASE_URL || !SUPABASE_SERVICE_ROLE_KEY) {
+    throw new Error("Supabase REST no configurado para fallback de autenticacion.");
+  }
+
+  const baseUrl = SUPABASE_URL.replace(/\/+$/, "");
+  const controller = new AbortController();
+  const timeout = setTimeout(() => controller.abort(), 8000);
+
+  let response: Response;
+  try {
+    response = await fetch(`${baseUrl}/rest/v1${path}`, {
+      headers: {
+        apikey: SUPABASE_SERVICE_ROLE_KEY,
+        Authorization: `Bearer ${SUPABASE_SERVICE_ROLE_KEY}`,
+      },
+      signal: controller.signal,
+    });
+  } finally {
+    clearTimeout(timeout);
+  }
+
+  if (!response.ok) {
+    const bodyText = await response.text().catch(() => "");
+    throw new Error(`Fallback REST fallo (${response.status}): ${bodyText || "sin detalle"}`);
+  }
+
+  return (await response.json()) as T;
+};
+
+const fetchStaffLoginRowFromSupabaseRest = async (cedula: string): Promise<StaffLoginRawRow | null> => {
+  const encodedCedula = encodeURIComponent(cedula);
+
+  const staffRows = await fetchSupabaseRestJson<StaffLoginRestRow[]>(
+    `/staff?select=id,role_id,rol,nombres,apellidos,cedula,estado&cedula=eq.${encodedCedula}&limit=1`,
+  );
+
+  const staff = staffRows[0];
+  if (!staff) {
+    return null;
+  }
+
+  const encodedStaffId = encodeURIComponent(staff.id);
+  const credentialRows = await fetchSupabaseRestJson<StaffCredentialRestRow[]>(
+    `/staff_credentials?select=staff_id,password_hash&staff_id=eq.${encodedStaffId}&limit=1`,
+  );
+
+  return {
+    id: staff.id,
+    role_id: Number(staff.role_id),
+    rol: staff.rol,
+    nombres: staff.nombres,
+    apellidos: staff.apellidos,
+    cedula: staff.cedula,
+    estado: staff.estado,
+    password_hash: credentialRows[0]?.password_hash ?? null,
+  };
+};
+
+const normalizeTimeToHHmm = (value: string) => {
+  const [hour = "00", minute = "00"] = value.split(":");
+  return `${hour.padStart(2, "0")}:${minute.padStart(2, "0")}`;
+};
+
+const listStaffFromSupabaseRest = async () => {
+  const rows = await fetchSupabaseRestJson<StaffRestBasicRow[]>(
+    "/staff?select=id,numero_staff,role_id,rol,nombres,apellidos,cedula,telefono,fecha_nacimiento,carrera,tipo_contrato,conocimiento_sonido,estado,balance_horas,fecha_creacion&order=fecha_creacion.desc",
+  );
+
+  const mappedRows: StaffRawRow[] = rows.map((row) => ({
+    id: row.id,
+    numero_staff: Number(row.numero_staff ?? 0),
+    role_id: Number(row.role_id ?? 3),
+    rol: row.rol ?? "Colaborador",
+    nombres: row.nombres ?? "",
+    apellidos: row.apellidos ?? "",
+    cedula: row.cedula ?? "",
+    telefono: row.telefono ?? "",
+    fecha_nacimiento: row.fecha_nacimiento ?? "1970-01-01",
+    carrera: row.carrera ?? "",
+    tipo_contrato: row.tipo_contrato ?? "",
+    conocimiento_sonido: Boolean(row.conocimiento_sonido),
+    estado: row.estado,
+    balance_horas: Number(row.balance_horas ?? 0),
+    fecha_creacion: row.fecha_creacion ?? new Date(0).toISOString(),
+    bloqueo_id: null,
+    bloqueo_dia_semana: null,
+    bloqueo_hora_inicio: null,
+    bloqueo_hora_fin: null,
+    habilidad_id: null,
+    habilidad_nombre: null,
+    tiene_credencial: true,
+  }));
+
+  return mapStaffRows(mappedRows);
+};
+
+const listAllStaffJornadasFromSupabaseRest = async () => {
+  const rows = await fetchSupabaseRestJson<StaffJornadaRawRow[]>(
+    "/staff_jornada_semanal?select=id,staff_id,dia_semana,hora_entrada,hora_salida,total_horas_dia&order=dia_semana.asc,hora_entrada.asc,id.asc",
+  );
+
+  const grouped: Record<string, Array<{
+    id: string;
+    staffId: string;
+    diaSemana: string;
+    horaEntrada: string;
+    horaSalida: string;
+    totalHorasDia: number;
+  }>> = {};
+
+  for (const row of rows) {
+    if (!grouped[row.staff_id]) {
+      grouped[row.staff_id] = [];
+    }
+
+    const target = grouped[row.staff_id];
+    if (!target) continue;
+
+    target.push({
+      id: row.id,
+      staffId: row.staff_id,
+      diaSemana: row.dia_semana,
+      horaEntrada: normalizeTimeToHHmm(row.hora_entrada),
+      horaSalida: normalizeTimeToHHmm(row.hora_salida),
+      totalHorasDia: Number(row.total_horas_dia ?? 0),
+    });
+  }
+
+  return grouped;
+};
+
+const listAllStaffPausasFromSupabaseRest = async () => {
+  const rows = await fetchSupabaseRestJson<StaffPausaRawRow[]>(
+    "/staff_pausas_programadas?select=id,staff_id,dia_semana,tipo_pausa,hora_inicio,hora_fin&order=dia_semana.asc,hora_inicio.asc,id.asc",
+  );
+
+  const grouped: Record<string, Array<{
+    id: string;
+    staffId: string;
+    diaSemana: string;
+    tipoPausa: string;
+    horaInicio: string;
+    horaFin: string;
+  }>> = {};
+
+  for (const row of rows) {
+    if (!grouped[row.staff_id]) {
+      grouped[row.staff_id] = [];
+    }
+
+    const target = grouped[row.staff_id];
+    if (!target) continue;
+
+    target.push({
+      id: row.id,
+      staffId: row.staff_id,
+      diaSemana: row.dia_semana,
+      tipoPausa: row.tipo_pausa,
+      horaInicio: normalizeTimeToHHmm(row.hora_inicio),
+      horaFin: normalizeTimeToHHmm(row.hora_fin),
+    });
+  }
+
+  return grouped;
+};
 
 const ensureStaffHorarioLaboralSchema = async () => {
   // These tables should be created by migrations
@@ -461,23 +698,34 @@ export const authenticateStaffLogin = async (payload: {
 }): Promise<StaffLoginResult> => {
   await ensureStaffSecuritySchemaReady();
 
-  const rows = await prisma.$queryRaw<StaffLoginRawRow[]>`
-    SELECT
-      s.id::text AS id,
-      s.role_id,
-      s.rol,
-      s.nombres,
-      s.apellidos,
-      s.cedula,
-      s.estado,
-      c.password_hash
-    FROM public.staff s
-    LEFT JOIN public.staff_credentials c ON c.staff_id = s.id
-    WHERE s.cedula = ${payload.cedula}
-    LIMIT 1
-  `;
+  let staff: StaffLoginRawRow | null = null;
 
-  const staff = rows[0];
+  try {
+    const rows = await withTimeout(prisma.$queryRaw<StaffLoginRawRow[]>`
+      SELECT
+        s.id::text AS id,
+        s.role_id,
+        s.rol,
+        s.nombres,
+        s.apellidos,
+        s.cedula,
+        s.estado,
+        c.password_hash
+      FROM public.staff s
+      LEFT JOIN public.staff_credentials c ON c.staff_id = s.id
+      WHERE s.cedula = ${payload.cedula}
+      LIMIT 1
+    `, 6000, "Prisma login query timeout");
+
+    staff = rows[0] ?? null;
+  } catch (error) {
+    if (!isPrismaConnectionTimeoutError(error)) {
+      throw error;
+    }
+
+    staff = await fetchStaffLoginRowFromSupabaseRest(payload.cedula);
+  }
+
   if (!staff) {
     throw new StaffAuthError("Credenciales inválidas. Verifica la información ingresada.", 401);
   }
@@ -579,45 +827,53 @@ export const changeStaffPassword = async (payload: {
 export const listStaff = async () => {
   await ensureStaffSecuritySchemaReady();
 
-  const rows = await prisma.$queryRaw<StaffRawRow[]>`
-    SELECT
-      s.id::text AS id,
-      s.numero_staff,
-      s.role_id,
-      s.rol,
-      s.nombres,
-      s.apellidos,
-      s.cedula,
-      s.telefono,
-      TO_CHAR(s.fecha_nacimiento, 'YYYY-MM-DD') AS fecha_nacimiento,
-      s.carrera,
-      s.tipo_contrato,
-      s.conocimiento_sonido,
-      s.estado,
-      s.balance_horas,
-      TO_CHAR(s.fecha_creacion, 'YYYY-MM-DD"T"HH24:MI:SS.MS"Z"') AS fecha_creacion,
-      b.id::text AS bloqueo_id,
-      b.dia_semana AS bloqueo_dia_semana,
-      CASE
-        WHEN b.hora_inicio IS NULL THEN NULL
-        ELSE TO_CHAR(b.hora_inicio, 'HH24:MI')
-      END AS bloqueo_hora_inicio,
-      CASE
-        WHEN b.hora_fin IS NULL THEN NULL
-        ELSE TO_CHAR(b.hora_fin, 'HH24:MI')
-      END AS bloqueo_hora_fin
-      , h.id::text AS habilidad_id
-      , h.nombre AS habilidad_nombre
-      , (c.staff_id IS NOT NULL) AS tiene_credencial
-    FROM public.staff s
-    LEFT JOIN public.staff_bloqueos_clase b ON b.staff_id = s.id
-    LEFT JOIN public.staff_habilidades sh ON sh.staff_id = s.id
-    LEFT JOIN public.habilidades h ON h.id = sh.habilidad_id
-    LEFT JOIN public.staff_credentials c ON c.staff_id = s.id
-    ORDER BY s.fecha_creacion DESC, b.dia_semana ASC NULLS LAST, b.hora_inicio ASC NULLS LAST
-  `;
+  try {
+    const rows = await withTimeout(prisma.$queryRaw<StaffRawRow[]>`
+      SELECT
+        s.id::text AS id,
+        s.numero_staff,
+        s.role_id,
+        s.rol,
+        s.nombres,
+        s.apellidos,
+        s.cedula,
+        s.telefono,
+        TO_CHAR(s.fecha_nacimiento, 'YYYY-MM-DD') AS fecha_nacimiento,
+        s.carrera,
+        s.tipo_contrato,
+        s.conocimiento_sonido,
+        s.estado,
+        s.balance_horas,
+        TO_CHAR(s.fecha_creacion, 'YYYY-MM-DD"T"HH24:MI:SS.MS"Z"') AS fecha_creacion,
+        b.id::text AS bloqueo_id,
+        b.dia_semana AS bloqueo_dia_semana,
+        CASE
+          WHEN b.hora_inicio IS NULL THEN NULL
+          ELSE TO_CHAR(b.hora_inicio, 'HH24:MI')
+        END AS bloqueo_hora_inicio,
+        CASE
+          WHEN b.hora_fin IS NULL THEN NULL
+          ELSE TO_CHAR(b.hora_fin, 'HH24:MI')
+        END AS bloqueo_hora_fin
+        , h.id::text AS habilidad_id
+        , h.nombre AS habilidad_nombre
+        , (c.staff_id IS NOT NULL) AS tiene_credencial
+      FROM public.staff s
+      LEFT JOIN public.staff_bloqueos_clase b ON b.staff_id = s.id
+      LEFT JOIN public.staff_habilidades sh ON sh.staff_id = s.id
+      LEFT JOIN public.habilidades h ON h.id = sh.habilidad_id
+      LEFT JOIN public.staff_credentials c ON c.staff_id = s.id
+      ORDER BY s.fecha_creacion DESC, b.dia_semana ASC NULLS LAST, b.hora_inicio ASC NULLS LAST
+    `, 6000, "Prisma listStaff timeout");
 
-  return mapStaffRows(rows);
+    return mapStaffRows(rows);
+  } catch (error) {
+    if (!isPrismaConnectionTimeoutError(error)) {
+      throw error;
+    }
+
+    return listStaffFromSupabaseRest();
+  }
 };
 
 export const getStaffById = async (id: string) => {
@@ -998,7 +1254,8 @@ export const listStaffJornadaSemanal = async (staffId: string) => {
 export const listAllStaffJornadasSemanales = async () => {
   await ensureStaffHorarioLaboralSchemaReady();
 
-  const rows = await prisma.$queryRaw<StaffJornadaRawRow[]>`
+  try {
+    const rows = await withTimeout(prisma.$queryRaw<StaffJornadaRawRow[]>`
     SELECT
       j.id::text AS id,
       j.staff_id::text AS staff_id,
@@ -1020,7 +1277,7 @@ export const listAllStaffJornadasSemanales = async () => {
       END ASC,
       j.hora_entrada ASC,
       j.id ASC
-  `;
+  `, 6000, "Prisma listAllStaffJornadasSemanales timeout");
 
   const grouped: Record<string, Array<{
     id: string;
@@ -1049,13 +1306,21 @@ export const listAllStaffJornadasSemanales = async () => {
     });
   }
 
-  return grouped;
+    return grouped;
+  } catch (error) {
+    if (!isPrismaConnectionTimeoutError(error)) {
+      throw error;
+    }
+
+    return listAllStaffJornadasFromSupabaseRest();
+  }
 };
 
 export const listAllStaffPausasProgramadas = async () => {
   await ensureStaffHorarioLaboralSchemaReady();
 
-  const rows = await prisma.$queryRaw<StaffPausaRawRow[]>`
+  try {
+    const rows = await withTimeout(prisma.$queryRaw<StaffPausaRawRow[]>`
     SELECT
       p.id::text AS id,
       p.staff_id::text AS staff_id,
@@ -1077,7 +1342,7 @@ export const listAllStaffPausasProgramadas = async () => {
       END ASC,
       p.hora_inicio ASC,
       p.id ASC
-  `;
+  `, 6000, "Prisma listAllStaffPausasProgramadas timeout");
 
   const grouped: Record<string, Array<{
     id: string;
@@ -1106,7 +1371,14 @@ export const listAllStaffPausasProgramadas = async () => {
     });
   }
 
-  return grouped;
+    return grouped;
+  } catch (error) {
+    if (!isPrismaConnectionTimeoutError(error)) {
+      throw error;
+    }
+
+    return listAllStaffPausasFromSupabaseRest();
+  }
 };
 
 export const replaceStaffJornadaSemanal = async (staffId: string, jornadas: StaffJornadaInput[]) => {

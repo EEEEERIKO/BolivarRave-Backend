@@ -55,6 +55,22 @@ const upload = multer({
 
 export const schedulesRouter = Router();
 
+const isPrismaConnectionTimeoutError = (error: unknown) => {
+  if (!error || typeof error !== "object") {
+    return false;
+  }
+
+  const maybeCode = "code" in error ? String((error as { code?: unknown }).code ?? "") : "";
+  const maybeMessage = "message" in error ? String((error as { message?: unknown }).message ?? "").toLowerCase() : "";
+
+  return (
+    maybeCode === "P2028" ||
+    maybeCode === "ETIMEDOUT" ||
+    maybeMessage.includes("timeout") ||
+    maybeMessage.includes("unable to start a transaction")
+  );
+};
+
 const parsedRowSchema = z.object({
   faculty: z.string().min(1),
   code: z.string().min(1),
@@ -794,6 +810,11 @@ schedulesRouter.get("/requests", requireAdminRole, async (_req, res, next) => {
     const requests = await getPendingScheduleRequests();
     return res.json({ requests });
   } catch (error) {
+    if (isPrismaConnectionTimeoutError(error)) {
+      // Degrade gracefully when DB connectivity is unstable.
+      return res.json({ requests: [] });
+    }
+
     return next(error);
   }
 });
