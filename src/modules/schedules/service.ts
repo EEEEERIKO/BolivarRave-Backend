@@ -69,21 +69,28 @@ export type SharedScheduleState = {
   visualAssignments: SharedScheduleVisualAssignment[];
 };
 
-const withTimeout = async <T>(promise: Promise<T>, timeoutMs: number, timeoutMessage: string): Promise<T> => {
-  let timer: NodeJS.Timeout | null = null;
+export type RoomActionType =
+  | "inhabilitado"
+  | "habilitado"
+  | "danio_reportado"
+  | "salon_limpio";
 
-  try {
-    return await Promise.race([
-      promise,
-      new Promise<T>((_resolve, reject) => {
-        timer = setTimeout(() => reject(new Error(timeoutMessage)), timeoutMs);
-      }),
-    ]);
-  } finally {
-    if (timer) {
-      clearTimeout(timer);
-    }
-  }
+export type RoomActionActor = {
+  staffId?: string | null | undefined;
+  name?: string | null | undefined;
+  role?: string | null | undefined;
+};
+
+export type RoomActionHistoryItem = {
+  id: string;
+  roomId: string;
+  roomName: string;
+  actionType: RoomActionType;
+  note: string | null;
+  createdAt: string;
+  createdByStaffId: string | null;
+  createdByName: string | null;
+  createdByRole: string | null;
 };
 
 const ensureImportsHistoryTable = async () => {
@@ -186,6 +193,27 @@ const ensureSharedScheduleStateTables = async () => {
       updated_at timestamptz NOT NULL DEFAULT now(),
       CONSTRAINT schedule_visual_room_assignments_event_date_uq UNIQUE (event_id, target_date)
     )
+  `);
+
+  await prisma.$executeRawUnsafe(`
+    CREATE TABLE IF NOT EXISTS public.schedule_room_action_history (
+      id uuid PRIMARY KEY DEFAULT gen_random_uuid(),
+      salon_id uuid NOT NULL REFERENCES public.salones(id) ON DELETE CASCADE,
+      room_name text NOT NULL,
+      action_type text NOT NULL,
+      note text,
+      created_by_staff_id uuid,
+      created_by_name text,
+      created_by_role text,
+      created_at timestamptz NOT NULL DEFAULT now(),
+      CONSTRAINT schedule_room_action_history_action_chk
+        CHECK (action_type IN ('inhabilitado', 'habilitado', 'danio_reportado', 'salon_limpio'))
+    )
+  `);
+
+  await prisma.$executeRawUnsafe(`
+    CREATE INDEX IF NOT EXISTS idx_schedule_room_action_history_salon_date
+    ON public.schedule_room_action_history (salon_id, created_at DESC)
   `);
 };
 
@@ -621,6 +649,66 @@ const canonicalRoomName = (room: string): string | null => {
   if (directMatch) return directMatch;
 
   return null;
+};
+
+const resolveSalonForRoomAction = async (roomName: string) => {
+  const canonical = canonicalRoomName(roomName)?.trim() || roomName.trim();
+  if (!canonical) {
+    throw new Error("El salon no puede estar vacio");
+  }
+
+  const salones = await prisma.$queryRaw<Array<{ id: string; room_name: string }>>`
+    SELECT id::text AS id, nombre_bloque AS room_name
+    FROM public.salones
+  `;
+
+  const targetKey = roomKey(canonical);
+  const matched = salones.find((salon) => roomKey(canonicalRoomName(salon.room_name) ?? salon.room_name) === targetKey);
+
+  if (!matched) {
+    throw new Error("No se encontro el salon seleccionado");
+  }
+
+  return {
+    roomId: matched.id,
+    roomName: canonicalRoomName(matched.room_name) ?? matched.room_name,
+  };
+};
+
+const recordRoomActionHistory = async (payload: {
+  roomName: string;
+  actionType: RoomActionType;
+  note?: string | null;
+  actor?: RoomActionActor | undefined;
+}) => {
+  await ensureSharedScheduleStateReady();
+
+  const room = await resolveSalonForRoomAction(payload.roomName);
+  const actorName = payload.actor?.name?.trim() || null;
+  const actorRole = payload.actor?.role?.trim() || null;
+  const actorStaffId = payload.actor?.staffId?.trim() || null;
+  const cleanNote = payload.note?.trim() || null;
+
+  await prisma.$executeRaw`
+    INSERT INTO public.schedule_room_action_history (
+      salon_id,
+      room_name,
+      action_type,
+      note,
+      created_by_staff_id,
+      created_by_name,
+      created_by_role
+    )
+    VALUES (
+      ${room.roomId}::uuid,
+      ${room.roomName},
+      ${payload.actionType},
+      ${cleanNote},
+      ${actorStaffId}::uuid,
+      ${actorName},
+      ${actorRole}
+    )
+  `;
 };
 
 const toMinutes = (time: string) => {
@@ -1884,13 +1972,9 @@ export const getScheduleEvents = async () => {
 };
 
 export const getPendingScheduleRequests = async () => {
-  await withTimeout(
-    ensureScheduleRequestsTableReady(),
-    5000,
-    "Prisma schedules requests table bootstrap timeout"
-  );
+  await ensureScheduleRequestsTableReady();
 
-  const requests = await withTimeout(prisma.$queryRaw<
+  const requests = await prisma.$queryRaw<
     Array<{
       request_id: string;
       event_id: string;
@@ -1936,7 +2020,7 @@ export const getPendingScheduleRequests = async () => {
     LEFT JOIN public.facultades f ON f.id = e.facultad_id
     WHERE sr.estado = 'pendiente'
     ORDER BY sr.id, h.dia_semana, h.hora_inicio
-  `, 6000, "Prisma schedules pending requests query timeout");
+  `;
 
   return requests.map((request) => ({
     id: request.request_id,
@@ -2234,13 +2318,11 @@ export const getSharedScheduleState = async (): Promise<SharedScheduleState> => 
   };
 };
 
-export const setSharedRoomDisabledState = async (roomName: string, disabled: boolean) => {
+export const setSharedRoomDisabledState = async (roomName: string, disabled: boolean, actor?: RoomActionActor | undefined) => {
   await ensureSharedScheduleStateReady();
 
-  const canonical = canonicalRoomName(roomName)?.trim() || roomName.trim();
-  if (!canonical) {
-    throw new Error("El salon no puede estar vacio");
-  }
+  const room = await resolveSalonForRoomAction(roomName);
+  const canonical = room.roomName;
 
   if (disabled) {
     await prisma.$executeRaw`
@@ -2256,6 +2338,12 @@ export const setSharedRoomDisabledState = async (roomName: string, disabled: boo
       WHERE room_name = ${canonical}
     `;
   }
+
+  await recordRoomActionHistory({
+    roomName: canonical,
+    actionType: disabled ? "inhabilitado" : "habilitado",
+    actor,
+  });
 
   return getSharedScheduleState();
 };
@@ -2299,6 +2387,106 @@ export const deleteSharedVisualRoomAssignment = async (eventId: string, targetDa
   `;
 
   return getSharedScheduleState();
+};
+
+export const reportRoomDamage = async (payload: {
+  roomId: string;
+  note: string;
+  actor?: RoomActionActor | undefined;
+}) => {
+  await ensureSharedScheduleStateReady();
+
+  const note = payload.note.trim();
+  if (note.length < 5) {
+    throw new Error("Debes describir el daño (minimo 5 caracteres)");
+  }
+
+  const room = await prisma.$queryRaw<Array<{ id: string; room_name: string }>>`
+    SELECT id::text AS id, nombre_bloque AS room_name
+    FROM public.salones
+    WHERE id = ${payload.roomId}::uuid
+    LIMIT 1
+  `;
+
+  const selected = room[0];
+  if (!selected) {
+    throw new Error("No se encontro el salon seleccionado");
+  }
+
+  const canonicalRoom = canonicalRoomName(selected.room_name) ?? selected.room_name;
+
+  await recordRoomActionHistory({
+    roomName: canonicalRoom,
+    actionType: "danio_reportado",
+    note,
+    actor: payload.actor,
+  });
+};
+
+export const markRoomClean = async (payload: { roomId: string; actor?: RoomActionActor | undefined }) => {
+  await ensureSharedScheduleStateReady();
+
+  const room = await prisma.$queryRaw<Array<{ id: string; room_name: string }>>`
+    SELECT id::text AS id, nombre_bloque AS room_name
+    FROM public.salones
+    WHERE id = ${payload.roomId}::uuid
+    LIMIT 1
+  `;
+
+  const selected = room[0];
+  if (!selected) {
+    throw new Error("No se encontro el salon seleccionado");
+  }
+
+  const canonicalRoom = canonicalRoomName(selected.room_name) ?? selected.room_name;
+
+  await recordRoomActionHistory({
+    roomName: canonicalRoom,
+    actionType: "salon_limpio",
+    actor: payload.actor,
+  });
+};
+
+export const getRoomActionHistory = async (roomId: string): Promise<RoomActionHistoryItem[]> => {
+  await ensureSharedScheduleStateReady();
+
+  const rows = await prisma.$queryRaw<Array<{
+    id: string;
+    room_id: string;
+    room_name: string;
+    action_type: RoomActionType;
+    note: string | null;
+    created_at: string;
+    created_by_staff_id: string | null;
+    created_by_name: string | null;
+    created_by_role: string | null;
+  }>>`
+    SELECT
+      h.id::text AS id,
+      h.salon_id::text AS room_id,
+      h.room_name,
+      h.action_type,
+      h.note,
+      TO_CHAR(h.created_at, 'YYYY-MM-DD"T"HH24:MI:SS.MS"Z"') AS created_at,
+      h.created_by_staff_id::text AS created_by_staff_id,
+      h.created_by_name,
+      h.created_by_role
+    FROM public.schedule_room_action_history h
+    WHERE h.salon_id = ${roomId}::uuid
+    ORDER BY h.created_at DESC
+  `;
+
+  return rows.map((row) => ({
+    id: row.id,
+    roomId: row.room_id,
+    roomName: canonicalRoomName(row.room_name) ?? row.room_name,
+    actionType: row.action_type,
+    note: row.note,
+    createdAt: row.created_at,
+    createdByStaffId: row.created_by_staff_id,
+    createdByName: row.created_by_name,
+    createdByRole: row.created_by_role,
+  }));
 };
 
 export const findAvailableRooms = async (payload: SearchAvailableRoomsInput) => {

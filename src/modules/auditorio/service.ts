@@ -134,23 +134,6 @@ const toSqlLocalTimestamp = (value: Date) => {
   return `${year}-${month}-${day} ${hour}:${minute}:${second}`;
 };
 
-const withTimeout = async <T>(promise: Promise<T>, timeoutMs: number, timeoutMessage: string): Promise<T> => {
-  let timer: NodeJS.Timeout | null = null;
-
-  try {
-    return await Promise.race([
-      promise,
-      new Promise<T>((_resolve, reject) => {
-        timer = setTimeout(() => reject(new Error(timeoutMessage)), timeoutMs);
-      }),
-    ]);
-  } finally {
-    if (timer) {
-      clearTimeout(timer);
-    }
-  }
-};
-
 let ensureAuditorioEncargadosTablePromise: Promise<void> | null = null;
 
 const ensureAuditorioEncargadosTableReady = async () => {
@@ -308,12 +291,12 @@ const syncReservaEncargadosTx = async (
 };
 
 const getAuditorioRequerimientosColumns = async (): Promise<AuditorioRequerimientosColumns> => {
-  const columns = await withTimeout(prisma.$queryRaw<Array<{ column_name: string }>>`
+  const columns = await prisma.$queryRaw<Array<{ column_name: string }>>`
     SELECT column_name
     FROM information_schema.columns
     WHERE table_schema = 'public'
       AND table_name = 'reservas_auditorio'
-  `, 6000, "Prisma auditorio schema columns timeout");
+  `;
 
   const available = new Set(columns.map((row) => row.column_name));
 
@@ -522,7 +505,7 @@ export const listUpcomingAuditorioNotifications = async (
   const startSql = toSqlLocalTimestamp(windowStart);
   const endSql = toSqlLocalTimestamp(windowEnd);
 
-  const rows = await withTimeout(prisma.$queryRaw<
+  const rows = await prisma.$queryRaw<
     Array<{
       reserva_id: string;
       horario_id: string;
@@ -555,7 +538,7 @@ export const listUpcomingAuditorioNotifications = async (
         OR (${startSql}::timestamp BETWEEN (h.fecha_especifica + h.hora_inicio) AND (h.fecha_especifica + h.hora_fin))
       )
     ORDER BY (h.fecha_especifica + h.hora_inicio) ASC, h.hora_fin ASC
-  `, 6000, "Prisma auditorio notifications query timeout");
+  `;
 
   const reservationIds = Array.from(new Set(rows.map((row) => row.reserva_id)));
   const encargadosByReserva = new Map<string, AuditorioEncargado[]>();
@@ -587,7 +570,7 @@ export const listUpcomingAuditorioNotifications = async (
       ? `r.${quoteIdentifier(requerimientosColumns.requiereFiltroAgua)} AS requiere_filtro_agua,`
       : "false AS requiere_filtro_agua,";
 
-    const reservasRows = await withTimeout(prisma.$queryRawUnsafe<Array<{
+    const reservasRows = await prisma.$queryRawUnsafe<Array<{
       reserva_id: string;
       nombre_evento: string;
       organizador: string;
@@ -621,7 +604,7 @@ export const listUpcomingAuditorioNotifications = async (
       WHERE r.id::text = ANY($1)
     `,
       reservationIds
-    ), 6000, "Prisma auditorio reservas details timeout");
+    );
 
     for (const row of reservasRows) {
       reservaById.set(row.reserva_id, {
@@ -640,7 +623,7 @@ export const listUpcomingAuditorioNotifications = async (
       });
     }
 
-    const horariosRows = await withTimeout(prisma.$queryRaw<Array<{
+    const horariosRows = await prisma.$queryRaw<Array<{
       reserva_id: string;
       horario_id: string;
       fecha_especifica: string;
@@ -656,7 +639,7 @@ export const listUpcomingAuditorioNotifications = async (
       FROM public.horarios_intercalados_auditorio h
       WHERE h.reserva_id::text = ANY(${reservationIds})
       ORDER BY h.fecha_especifica ASC, h.hora_inicio ASC
-    `, 6000, "Prisma auditorio horarios timeout");
+    `;
 
     for (const row of horariosRows) {
       const bucket = horariosByReserva.get(row.reserva_id) ?? [];
@@ -669,7 +652,7 @@ export const listUpcomingAuditorioNotifications = async (
       horariosByReserva.set(row.reserva_id, bucket);
     }
 
-    const encargadosRows = await withTimeout(prisma.$queryRaw<Array<{
+    const encargadosRows = await prisma.$queryRaw<Array<{
       reserva_id: string;
       staff_id: string;
       cedula: string;
@@ -692,7 +675,7 @@ export const listUpcomingAuditorioNotifications = async (
       INNER JOIN public.staff s ON s.id = a.staff_id
       WHERE a.reserva_id::text = ANY(${reservationIds})
       ORDER BY a.reserva_id, s.nombres, s.apellidos
-    `, 6000, "Prisma auditorio encargados timeout");
+    `;
 
     for (const row of encargadosRows) {
       const bucket = encargadosByReserva.get(row.reserva_id) ?? [];
@@ -757,7 +740,7 @@ export const listUpcomingAuditorioNotifications = async (
 };
 
 export const listPendingAuditorioNotifications = async (): Promise<PendingAuditorioNotification[]> => {
-  const rows = await withTimeout(prisma.$queryRaw<Array<{
+  const rows = await prisma.$queryRaw<Array<{
     reserva_id: string;
     nombre_evento: string;
     organizador: string;
@@ -794,7 +777,7 @@ export const listPendingAuditorioNotifications = async (): Promise<PendingAudito
     WHERE r.estado = 'Pendiente'::public.auditorio_estado_enum
     ORDER BY r.fecha_creacion DESC
     LIMIT 25
-  `, 6000, "Prisma auditorio pending notifications timeout");
+  `;
 
   return rows.map((row) => ({
     id: `pending:${row.reserva_id}`,

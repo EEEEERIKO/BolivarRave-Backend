@@ -12,6 +12,7 @@ import {
   deletePendingScheduleRequest,
   deletePendingScheduleRequestByEventId,
   findAvailableRooms,
+  getRoomActionHistory,
   getImportsHistory,
   getRooms,
   getSharedScheduleState,
@@ -19,6 +20,8 @@ import {
   getPendingScheduleRequests,
   deleteSharedVisualRoomAssignment,
   setSharedRoomDisabledState,
+  markRoomClean,
+  reportRoomDamage,
   replaceAllSchedulesFromRows,
   upsertSharedVisualRoomAssignment,
   updatePendingScheduleRequest,
@@ -54,22 +57,6 @@ const upload = multer({
 });
 
 export const schedulesRouter = Router();
-
-const isPrismaConnectionTimeoutError = (error: unknown) => {
-  if (!error || typeof error !== "object") {
-    return false;
-  }
-
-  const maybeCode = "code" in error ? String((error as { code?: unknown }).code ?? "") : "";
-  const maybeMessage = "message" in error ? String((error as { message?: unknown }).message ?? "").toLowerCase() : "";
-
-  return (
-    maybeCode === "P2028" ||
-    maybeCode === "ETIMEDOUT" ||
-    maybeMessage.includes("timeout") ||
-    maybeMessage.includes("unable to start a transaction")
-  );
-};
 
 const parsedRowSchema = z.object({
   faculty: z.string().min(1),
@@ -164,6 +151,14 @@ const sharedVisualAssignmentSchema = z.object({
 const sharedVisualAssignmentDeleteSchema = z.object({
   eventId: z.string().uuid(),
   targetDate: z.string().regex(/^\d{4}-\d{2}-\d{2}$/),
+});
+
+const roomActionParamsSchema = z.object({
+  roomId: z.string().uuid(),
+});
+
+const roomDamageBodySchema = z.object({
+  note: z.string().min(5),
 });
 
 type RoomsInfoRawRow = {
@@ -810,11 +805,6 @@ schedulesRouter.get("/requests", requireAdminRole, async (_req, res, next) => {
     const requests = await getPendingScheduleRequests();
     return res.json({ requests });
   } catch (error) {
-    if (isPrismaConnectionTimeoutError(error)) {
-      // Degrade gracefully when DB connectivity is unstable.
-      return res.json({ requests: [] });
-    }
-
     return next(error);
   }
 });
@@ -954,13 +944,88 @@ schedulesRouter.get("/state", async (_req, res, next) => {
 schedulesRouter.put("/state/disabled-rooms", requireAdminRole, async (req, res, next) => {
   try {
     const parsed = sharedRoomDisableSchema.parse(req.body);
-    const state = await setSharedRoomDisabledState(parsed.roomName, parsed.disabled);
+    const authUser = (req as AuthenticatedRequest).authUser;
+    const state = await setSharedRoomDisabledState(parsed.roomName, parsed.disabled, {
+      staffId: authUser?.staffId,
+      name: authUser?.name,
+      role: authUser?.roleLabel,
+    });
     broadcastScheduleRefresh();
     return res.json(state);
   } catch (error) {
     if (error instanceof z.ZodError) {
       return res.status(400).json({
         error: `Payload invalido: ${error.issues[0]?.message ?? "error de validacion"}`,
+      });
+    }
+
+    return next(error);
+  }
+});
+
+schedulesRouter.get("/rooms/:roomId/history", async (req, res, next) => {
+  try {
+    const parsed = roomActionParamsSchema.parse(req.params);
+    const history = await getRoomActionHistory(parsed.roomId);
+    return res.json({ history });
+  } catch (error) {
+    if (error instanceof z.ZodError) {
+      return res.status(400).json({
+        error: `Parametros invalidos: ${error.issues[0]?.message ?? "error de validacion"}`,
+      });
+    }
+
+    return next(error);
+  }
+});
+
+schedulesRouter.post("/rooms/:roomId/actions/damage", async (req, res, next) => {
+  try {
+    const params = roomActionParamsSchema.parse(req.params);
+    const body = roomDamageBodySchema.parse(req.body);
+    const authUser = (req as AuthenticatedRequest).authUser;
+
+    await reportRoomDamage({
+      roomId: params.roomId,
+      note: body.note,
+      actor: {
+        staffId: authUser?.staffId,
+        name: authUser?.name,
+        role: authUser?.roleLabel,
+      },
+    });
+
+    return res.status(201).json({ message: "Daño reportado correctamente" });
+  } catch (error) {
+    if (error instanceof z.ZodError) {
+      return res.status(400).json({
+        error: `Payload invalido: ${error.issues[0]?.message ?? "error de validacion"}`,
+      });
+    }
+
+    return next(error);
+  }
+});
+
+schedulesRouter.post("/rooms/:roomId/actions/clean", async (req, res, next) => {
+  try {
+    const params = roomActionParamsSchema.parse(req.params);
+    const authUser = (req as AuthenticatedRequest).authUser;
+
+    await markRoomClean({
+      roomId: params.roomId,
+      actor: {
+        staffId: authUser?.staffId,
+        name: authUser?.name,
+        role: authUser?.roleLabel,
+      },
+    });
+
+    return res.status(201).json({ message: "Salon marcado como limpio" });
+  } catch (error) {
+    if (error instanceof z.ZodError) {
+      return res.status(400).json({
+        error: `Parametros invalidos: ${error.issues[0]?.message ?? "error de validacion"}`,
       });
     }
 
