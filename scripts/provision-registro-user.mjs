@@ -47,7 +47,7 @@ async function hashPassword(password) {
 async function ensureRoleRegistro() {
   await rest("/staff_roles?on_conflict=id", {
     method: "POST",
-    body: JSON.stringify({ id: 4, nombre: "Registro" }),
+    body: JSON.stringify({ id: 2, nombre: "Monitor" }),
     headers: {
       Prefer: "resolution=merge-duplicates,return=minimal",
     },
@@ -68,8 +68,8 @@ async function upsertStaffMonitor() {
     await rest("/staff?cedula=eq.Monitor", {
       method: "PATCH",
       body: JSON.stringify({
-        role_id: 4,
-        rol: "Registro",
+        role_id: 2,
+        rol: "Monitor",
         estado: "Active",
       }),
       headers: { Prefer: "return=minimal" },
@@ -82,14 +82,14 @@ async function upsertStaffMonitor() {
     method: "POST",
     body: JSON.stringify({
       numero_staff: numeroStaff,
-      role_id: 4,
-      rol: "Registro",
+      role_id: 2,
+      rol: "Monitor",
       nombres: "Monitor",
-      apellidos: "Registro",
+      apellidos: "",
       cedula: "Monitor",
       telefono: "0000000",
       fecha_nacimiento: "1990-01-01",
-      carrera: "Registro",
+      carrera: "Monitor",
       tipo_contrato: "Plan Monitoria",
       conocimiento_sonido: false,
       estado: "Active",
@@ -159,7 +159,7 @@ async function main() {
     login: {
       cedula: "Monitor",
       password: "Monitor123",
-      roleExpected: "registro",
+      roleExpected: "monitor",
     },
   }, null, 2));
 }

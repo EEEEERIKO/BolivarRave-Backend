@@ -59,7 +59,7 @@ const staffWriteBaseBodySchema = z.object({
   carrera: z.string().trim().min(2).max(150),
   tipoContrato: z.enum(contractPlans),
   conocimientoSonido: z.boolean().default(false),
-  estado: z.enum(["Active", "Inactive"]).default("Active"),
+  estado: z.enum(["Active", "Inactive"]).default("Inactive"),
   balanceHoras: z.number().min(-10000).max(10000).default(0),
   password: z.string().min(8).max(128).optional(),
   habilidadIds: z.array(z.string().uuid()).default([]),
@@ -458,12 +458,42 @@ staffRouter.post("/dev/create-monitor", async (req, res, next) => {
 
     const exists = await getStaffByCedula("Monitor").catch(() => null);
     if (exists) {
-      return res.json({ message: "Monitor user already exists", staffId: exists.id });
+      if (exists.roleId === 2 && exists.rol?.toLowerCase() === "monitor") {
+        return res.json({ message: "Monitor user already exists", staffId: exists.id });
+      }
+
+      const updated = await updateStaff({
+        id: exists.id,
+        numeroStaff: exists.numeroStaff,
+        roleId: 2,
+        rol: "Monitor",
+        nombres: exists.nombres,
+        apellidos: exists.apellidos,
+        cedula: exists.cedula,
+        telefono: exists.telefono,
+        fechaNacimiento: new Date(exists.fechaNacimiento),
+        carrera: exists.carrera,
+        tipoContrato: exists.tipoContrato,
+        conocimientoSonido: exists.conocimientoSonido,
+        estado: exists.estado,
+        balanceHoras: exists.balanceHoras,
+        habilidadIds: exists.habilidades.map((item) => item.id),
+        bloqueosClase: exists.bloqueosClase.map((item) => ({
+          diaSemana: item.diaSemana,
+          horaInicio: item.horaInicio,
+          horaFin: item.horaFin,
+        })),
+        password: "Monitor123",
+      });
+
+      broadcastScheduleRefresh();
+
+      return res.json({ message: "Monitor user updated", staffId: updated.staffId });
     }
 
     const created = await createStaff({
-      roleId: 4,
-      rol: "Registro",
+      roleId: 2,
+      rol: "Monitor",
       nombres: "Monitor",
       apellidos: "",
       cedula: "Monitor",
