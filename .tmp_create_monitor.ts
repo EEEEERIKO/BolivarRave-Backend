@@ -13,7 +13,7 @@ const hashPassword = async (password: string) => {
 const main = async () => {
   await prisma.$executeRaw`
     INSERT INTO public.staff_roles (id, nombre)
-    VALUES (4, 'Registro')
+    VALUES (2, 'Monitor')
     ON CONFLICT (id) DO UPDATE SET nombre = EXCLUDED.nombre
   `;
 
@@ -51,8 +51,8 @@ const main = async () => {
         balance_horas
       ) VALUES (
         ${numeroStaff},
-        4,
-        'Registro',
+        2,
+        'Monitor',
         'Monitor',
         'Registro',
         'Monitor',
@@ -71,8 +71,8 @@ const main = async () => {
   } else {
     await prisma.$executeRaw`
       UPDATE public.staff
-      SET role_id = 4,
-          rol = 'Registro',
+      SET role_id = 2,
+          rol = 'Monitor',
           estado = 'Active'::public.staff_estado_enum
       WHERE id = ${staffId}::uuid
     `;

@@ -526,7 +526,7 @@ export const getOperationsDashboard = async (): Promise<OperationsDashboardRespo
     safe(listReservationRequests(), [] as ReservationRequestRow[]),
     safe(listRoomActions(), [] as RoomActionRow[]),
     safe(listAllStaffJornadasSemanales(), {} as Record<string, Array<{ id: string; staffId: string; diaSemana: string; horaEntrada: string; horaSalida: string; totalHorasDia: number }>>),
-    safe(listAllStaffPausasProgramadas(), {} as Record<string, Array<{ id: string; staffId: string; diaSemana: string; tipoPausa: string; horaInicio: string; horaFin: string }>),
+    safe(listAllStaffPausasProgramadas(), {} as Record<string, Array<{ id: string; staffId: string; diaSemana: string; tipoPausa: string; horaInicio: string; horaFin: string }>>),
     safe(getAttendanceDashboard(), null as Awaited<ReturnType<typeof getAttendanceDashboard>> | null),
   ]);
 
