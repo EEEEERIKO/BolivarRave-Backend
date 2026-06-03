@@ -17,7 +17,8 @@ const FALLBACK_DEV_SECRET = "unac-dev-jwt-secret-change-me";
 const JWT_SECRET = AUTH_JWT_SECRET || (!isProduction ? FALLBACK_DEV_SECRET : "");
 const JWT_ISSUER = "unac-bolivar-horarios";
 const JWT_AUDIENCE = "unac-frontend";
-const JWT_EXPIRES_IN = "8h";
+export const ACCESS_TOKEN_EXPIRES_IN =
+  (process.env.AUTH_ACCESS_TOKEN_EXPIRES_IN?.trim() || "15m") as NonNullable<jwt.SignOptions["expiresIn"]>;
 
 if (isProduction && !AUTH_JWT_SECRET) {
   throw new Error("AUTH_JWT_SECRET es obligatoria en produccion");
@@ -25,7 +26,7 @@ if (isProduction && !AUTH_JWT_SECRET) {
 
 export const signAuthToken = (payload: AuthTokenPayload) => {
   return jwt.sign(payload, JWT_SECRET, {
-    expiresIn: JWT_EXPIRES_IN,
+    expiresIn: ACCESS_TOKEN_EXPIRES_IN,
     issuer: JWT_ISSUER,
     audience: JWT_AUDIENCE,
   });

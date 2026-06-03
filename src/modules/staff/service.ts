@@ -1,5 +1,5 @@
 import { prisma } from "../../lib/prisma";
-import { randomBytes, scrypt as scryptCallback, timingSafeEqual } from "node:crypto";
+import { createHash, randomBytes, scrypt as scryptCallback, timingSafeEqual } from "node:crypto";
 import { promisify } from "node:util";
 
 export type StaffEstado = "Active" | "Inactive";
@@ -143,6 +143,16 @@ export type StaffLoginResult = {
   name: string;
 };
 
+type StaffRefreshTokenRow = {
+  id: string;
+  staff_id: string;
+  token_hash: string;
+  expires_at: string;
+  revoked_at: string | null;
+};
+
+const REFRESH_TOKEN_TTL_DAYS = Math.max(7, Number.parseInt(process.env.AUTH_REFRESH_TOKEN_TTL_DAYS ?? "120", 10) || 120);
+
 export class StaffAuthError extends Error {
   readonly status: number;
 
@@ -155,6 +165,7 @@ export class StaffAuthError extends Error {
 
 let ensureStaffHorarioLaboralSchemaPromise: Promise<void> | null = null;
 let ensureStaffSecuritySchemaPromise: Promise<void> | null = null;
+let ensureStaffSessionSchemaPromise: Promise<void> | null = null;
 const scryptAsync = promisify(scryptCallback);
 // role ids: 1 = admin, 2 = monitor, 3 = colaborador, 4 = registro
 const CREDENTIAL_REQUIRED_ROLE_IDS = new Set([1, 2, 4]);
@@ -171,6 +182,33 @@ const ensureStaffSecuritySchema = async () => {
   // Attempting to create them at runtime on Supabase causes timeouts
   // This function is a no-op - tables must exist from initial migration
   console.log("[staff-schema] Skipping dynamic schema creation (should use migrations)");
+};
+
+const ensureStaffSessionSchema = async () => {
+  await prisma.$executeRawUnsafe(`
+    CREATE TABLE IF NOT EXISTS public.staff_refresh_tokens (
+      id uuid PRIMARY KEY DEFAULT gen_random_uuid(),
+      staff_id uuid NOT NULL REFERENCES public.staff(id) ON DELETE CASCADE,
+      token_hash text NOT NULL UNIQUE,
+      expires_at timestamptz NOT NULL,
+      created_at timestamptz NOT NULL DEFAULT now(),
+      updated_at timestamptz NOT NULL DEFAULT now(),
+      revoked_at timestamptz,
+      replaced_by_token_hash text,
+      created_from_ip text,
+      user_agent text
+    )
+  `);
+
+  await prisma.$executeRawUnsafe(`
+    CREATE INDEX IF NOT EXISTS idx_staff_refresh_tokens_staff_id
+    ON public.staff_refresh_tokens (staff_id)
+  `);
+
+  await prisma.$executeRawUnsafe(`
+    CREATE INDEX IF NOT EXISTS idx_staff_refresh_tokens_expires_at
+    ON public.staff_refresh_tokens (expires_at)
+  `);
 };
 
 const ensureStaffHorarioLaboralSchemaReady = async () => {
@@ -193,6 +231,58 @@ const ensureStaffSecuritySchemaReady = async () => {
   }
 
   await ensureStaffSecuritySchemaPromise;
+};
+
+const ensureStaffSessionSchemaReady = async () => {
+  if (!ensureStaffSessionSchemaPromise) {
+    ensureStaffSessionSchemaPromise = ensureStaffSessionSchema().catch((error) => {
+      ensureStaffSessionSchemaPromise = null;
+      throw error;
+    });
+  }
+
+  await ensureStaffSessionSchemaPromise;
+};
+
+const hashRefreshToken = (token: string) => createHash("sha256").update(token).digest("hex");
+
+const getRefreshTokenExpiryDate = () => {
+  const expiresAt = new Date();
+  expiresAt.setDate(expiresAt.getDate() + REFRESH_TOKEN_TTL_DAYS);
+  return expiresAt;
+};
+
+const toStaffSession = (staff: StaffLoginRawRow): StaffLoginResult => ({
+  staffId: staff.id,
+  cedula: staff.cedula,
+  role: mapRoleFromRoleId(staff.role_id),
+  roleLabel: staff.rol,
+  name: `${staff.nombres} ${staff.apellidos}`.trim(),
+});
+
+const getStaffSessionById = async (staffId: string): Promise<StaffLoginResult | null> => {
+  const rows = await prisma.$queryRaw<StaffLoginRawRow[]>`
+    SELECT
+      s.id::text AS id,
+      s.role_id,
+      s.rol,
+      s.nombres,
+      s.apellidos,
+      s.cedula,
+      s.estado,
+      c.password_hash
+    FROM public.staff s
+    LEFT JOIN public.staff_credentials c ON c.staff_id = s.id
+    WHERE s.id = ${staffId}::uuid
+    LIMIT 1
+  `;
+
+  const staff = rows[0];
+  if (!staff || staff.estado !== "Active") {
+    return null;
+  }
+
+  return toStaffSession(staff);
 };
 
 const toIsoDate = (value: Date) => value.toISOString().slice(0, 10);
@@ -229,24 +319,10 @@ const verifyPasswordHash = async (plainPassword: string, storedHash: string) => 
   return timingSafeEqual(derivedKey, expectedKey);
 };
 
-const mapRoleFromRoleId = (roleId: number, roleLabel: string, fullName: string): StaffLoginResult["role"] => {
-  const normalizedLabel = roleLabel.trim().toLowerCase();
-  const normalizedName = fullName.trim().toLowerCase();
-
+const mapRoleFromRoleId = (roleId: number): StaffLoginResult["role"] => {
   if (roleId === 1) return "admin";
-  if (roleId === 4) return "registro";
-
-  if (roleId === 2 && normalizedLabel.includes("registro")) {
-    // Backward compatibility: some legacy "monitor registro" users were created with role_id=2.
-    return "registro";
-  }
-
-  if (roleId === 2 && normalizedName.includes("monitor registro")) {
-    // Additional fallback when legacy account keeps role label as "Monitor".
-    return "registro";
-  }
-
   if (roleId === 2) return "monitor";
+  if (roleId === 4) return "registro";
   return "colaborador";
 };
 
@@ -525,12 +601,124 @@ export const authenticateStaffLogin = async (payload: {
     throw new StaffAuthError("Este usuario debe ingresar por el portal de admin/monitor.", 403);
   }
 
+  return toStaffSession(staff);
+};
+
+export const createStaffRefreshToken = async (payload: {
+  staffId: string;
+  ip?: string | null;
+  userAgent?: string | null;
+}) => {
+  await ensureStaffSessionSchemaReady();
+
+  const token = randomBytes(48).toString("base64url");
+  const tokenHash = hashRefreshToken(token);
+  const expiresAt = getRefreshTokenExpiryDate();
+
+  await prisma.$executeRaw`
+    INSERT INTO public.staff_refresh_tokens (
+      staff_id,
+      token_hash,
+      expires_at,
+      created_from_ip,
+      user_agent
+    )
+    VALUES (
+      ${payload.staffId}::uuid,
+      ${tokenHash},
+      ${expiresAt.toISOString()}::timestamptz,
+      ${payload.ip?.trim() || null},
+      ${payload.userAgent?.trim() || null}
+    )
+  `;
+
   return {
-    staffId: staff.id,
-    cedula: staff.cedula,
-    role: mapRoleFromRoleId(staff.role_id, staff.rol, `${staff.nombres} ${staff.apellidos}`),
-    roleLabel: staff.rol,
-    name: `${staff.nombres} ${staff.apellidos}`.trim(),
+    token,
+    expiresAt,
+  };
+};
+
+export const revokeStaffRefreshToken = async (rawToken: string) => {
+  await ensureStaffSessionSchemaReady();
+
+  const tokenHash = hashRefreshToken(rawToken);
+  await prisma.$executeRaw`
+    UPDATE public.staff_refresh_tokens
+    SET revoked_at = now(),
+        updated_at = now()
+    WHERE token_hash = ${tokenHash}
+      AND revoked_at IS NULL
+  `;
+};
+
+export const rotateStaffRefreshToken = async (payload: {
+  refreshToken: string;
+  ip?: string | null;
+  userAgent?: string | null;
+}): Promise<{ session: StaffLoginResult; refreshToken: string; refreshTokenExpiresAt: Date }> => {
+  await ensureStaffSessionSchemaReady();
+
+  const currentHash = hashRefreshToken(payload.refreshToken);
+  const now = new Date();
+
+  const currentRows = await prisma.$queryRaw<StaffRefreshTokenRow[]>`
+    SELECT
+      id::text AS id,
+      staff_id::text AS staff_id,
+      token_hash,
+      expires_at::text AS expires_at,
+      revoked_at::text AS revoked_at
+    FROM public.staff_refresh_tokens
+    WHERE token_hash = ${currentHash}
+    LIMIT 1
+  `;
+
+  const current = currentRows[0];
+  if (!current || current.revoked_at || new Date(current.expires_at).getTime() <= now.getTime()) {
+    throw new StaffAuthError("Sesion invalida o expirada", 401);
+  }
+
+  const session = await getStaffSessionById(current.staff_id);
+  if (!session) {
+    throw new StaffAuthError("Sesion invalida o expirada", 401);
+  }
+
+  const nextToken = randomBytes(48).toString("base64url");
+  const nextHash = hashRefreshToken(nextToken);
+  const nextExpiry = getRefreshTokenExpiryDate();
+
+  await prisma.$transaction(async (tx) => {
+    await tx.$executeRaw`
+      UPDATE public.staff_refresh_tokens
+      SET revoked_at = now(),
+          replaced_by_token_hash = ${nextHash},
+          updated_at = now()
+      WHERE token_hash = ${currentHash}
+        AND revoked_at IS NULL
+    `;
+
+    await tx.$executeRaw`
+      INSERT INTO public.staff_refresh_tokens (
+        staff_id,
+        token_hash,
+        expires_at,
+        created_from_ip,
+        user_agent
+      )
+      VALUES (
+        ${session.staffId}::uuid,
+        ${nextHash},
+        ${nextExpiry.toISOString()}::timestamptz,
+        ${payload.ip?.trim() || null},
+        ${payload.userAgent?.trim() || null}
+      )
+    `;
+  }, { timeout: 20000, maxWait: 10000 });
+
+  return {
+    session,
+    refreshToken: nextToken,
+    refreshTokenExpiresAt: nextExpiry,
   };
 };
 

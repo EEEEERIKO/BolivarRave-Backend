@@ -106,9 +106,10 @@ const PUBLIC_API_PATHS = new Set([
   "/health",
   "/ws-status",
   "/staff/login",
+  "/staff/refresh",
+  "/staff/logout",
   "/schedules/state",
   "/auditorio/public/reservas",
-  ...(!isProduction ? ["/staff/dev/create-monitor"] : []),
 ]);
 
 app.use("/api", (req, res, next) => {
