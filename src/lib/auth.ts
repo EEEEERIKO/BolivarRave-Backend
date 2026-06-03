@@ -60,6 +60,16 @@ export type AuthenticatedRequest = import("express").Request & {
   authUser?: AuthTokenPayload;
 };
 
+const isMonitorRegistroSupervisor = (authUser: AuthTokenPayload) => {
+  if (authUser.role !== "registro") {
+    return false;
+  }
+
+  const normalizedLabel = authUser.roleLabel.trim().toLowerCase();
+  const normalizedName = authUser.name.trim().toLowerCase();
+  return normalizedLabel.includes("monitor") || normalizedName.includes("monitor registro");
+};
+
 export const requireAuthToken: RequestHandler = (req, res, next) => {
   const authHeader = (req.header("authorization") ?? "").trim();
   const token = authHeader.replace(/^Bearer\s+/i, "").trim();
@@ -98,7 +108,7 @@ export const requireAdminOrMonitorRole: RequestHandler = (req, res, next) => {
     return res.status(401).json({ error: "No autorizado" });
   }
 
-  if (authUser.role !== "admin" && authUser.role !== "monitor") {
+  if (authUser.role !== "admin" && authUser.role !== "monitor" && !isMonitorRegistroSupervisor(authUser)) {
     return res.status(403).json({ error: "Solo los perfiles Administrador y Monitor pueden realizar esta acción." });
   }
 
