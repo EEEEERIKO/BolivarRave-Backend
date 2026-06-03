@@ -118,3 +118,17 @@ export const requireAdminOrRegistroRole: RequestHandler = (req, res, next) => {
 
   return next();
 };
+
+export const requireAdminOrMonitorOrRegistroRole: RequestHandler = (req, res, next) => {
+  const authUser = (req as AuthenticatedRequest).authUser;
+
+  if (!authUser) {
+    return res.status(401).json({ error: "No autorizado" });
+  }
+
+  if (authUser.role !== "admin" && authUser.role !== "monitor" && authUser.role !== "registro") {
+    return res.status(403).json({ error: "Solo los perfiles Administrador, Monitor y Registro pueden realizar esta acción." });
+  }
+
+  return next();
+};

@@ -116,10 +116,28 @@ type StaffBalanceMovimientoRawRow = {
   created_at: string;
 };
 
+type StaffRecentActivityRawRow = {
+  id: string;
+  activity_type: "room_clean" | "room_report" | "room_toggle" | "attendance_entry" | "attendance_exit";
+  severity: "info" | "warning" | "danger";
+  title: string;
+  message: string;
+  created_at: string;
+};
+
 export type StaffBalanceMovimientoInput = {
   horasDelta: number;
   motivo?: string;
   creadoPorStaffId?: string;
+};
+
+export type StaffRecentActivityItem = {
+  id: string;
+  activityType: "room_clean" | "room_report" | "room_toggle" | "attendance_entry" | "attendance_exit";
+  severity: "info" | "warning" | "danger";
+  title: string;
+  message: string;
+  createdAt: string;
 };
 
 type StaffLoginRawRow = {
@@ -229,11 +247,72 @@ const verifyPasswordHash = async (plainPassword: string, storedHash: string) => 
   return timingSafeEqual(derivedKey, expectedKey);
 };
 
-const mapRoleFromRoleId = (roleId: number): StaffLoginResult["role"] => {
-  if (roleId === 1) return "admin";
-  if (roleId === 2) return "monitor";
-  if (roleId === 4) return "registro";
+const mapRoleFromRoleId = (roleId: number, roleLabel: string): StaffLoginResult["role"] => {
+  const normalizedLabel = roleLabel.trim().toLowerCase();
+
+  if (roleId === 1 || normalizedLabel.includes("admin")) return "admin";
+  if (roleId === 2 || normalizedLabel.includes("monitor")) return "monitor";
+  if (roleId === 4 || normalizedLabel.includes("registro")) return "registro";
   return "colaborador";
+};
+
+const getAuthConnectionString = () => {
+  const connectionString = process.env.DIRECT_URL ?? process.env.DATABASE_URL;
+  if (!connectionString) {
+    throw new Error("DATABASE_URL o DIRECT_URL no esta configurada");
+  }
+
+  return connectionString;
+};
+
+const getStaffLoginRowByCedula = async (cedula: string): Promise<StaffLoginRawRow | undefined> => {
+  const connectionString = getAuthConnectionString();
+  const { Client } = await import("pg");
+  const client = new Client({
+    connectionString,
+    connectionTimeoutMillis: 7000,
+    query_timeout: 7000,
+    statement_timeout: 7000,
+  });
+
+  await client.connect();
+
+  try {
+    const result = await client.query<StaffLoginRawRow>(
+      `
+        SELECT
+          s.id::text AS id,
+          s.role_id,
+          s.rol,
+          s.nombres,
+          s.apellidos,
+          s.cedula,
+          s.estado,
+          c.password_hash
+        FROM public.staff s
+        LEFT JOIN public.staff_credentials c ON c.staff_id = s.id
+        WHERE s.cedula = $1
+        LIMIT 1
+      `,
+      [cedula],
+    );
+
+    return result.rows[0];
+  } finally {
+    await client.end().catch(() => undefined);
+  }
+};
+
+const getStaffLoginRowByCedulaWithTimeout = async (cedula: string, timeoutMs = 8000): Promise<StaffLoginRawRow | undefined> => {
+  const timeoutError = Object.assign(new Error("Database login lookup timed out"), { code: "ETIMEDOUT" });
+
+  return Promise.race([
+    getStaffLoginRowByCedula(cedula),
+    new Promise<never>((_, reject) => {
+      const timer = setTimeout(() => reject(timeoutError), timeoutMs);
+      timer.unref?.();
+    }),
+  ]);
 };
 
 const getNextStaffNumberTx = async (tx: Pick<typeof prisma, "$queryRaw">) => {
@@ -461,23 +540,7 @@ export const authenticateStaffLogin = async (payload: {
 }): Promise<StaffLoginResult> => {
   await ensureStaffSecuritySchemaReady();
 
-  const rows = await prisma.$queryRaw<StaffLoginRawRow[]>`
-    SELECT
-      s.id::text AS id,
-      s.role_id,
-      s.rol,
-      s.nombres,
-      s.apellidos,
-      s.cedula,
-      s.estado,
-      c.password_hash
-    FROM public.staff s
-    LEFT JOIN public.staff_credentials c ON c.staff_id = s.id
-    WHERE s.cedula = ${payload.cedula}
-    LIMIT 1
-  `;
-
-  const staff = rows[0];
+  const staff = await getStaffLoginRowByCedulaWithTimeout(payload.cedula);
   if (!staff) {
     throw new StaffAuthError("Credenciales inválidas. Verifica la información ingresada.", 401);
   }
@@ -514,7 +577,7 @@ export const authenticateStaffLogin = async (payload: {
   return {
     staffId: staff.id,
     cedula: staff.cedula,
-    role: mapRoleFromRoleId(staff.role_id),
+    role: mapRoleFromRoleId(staff.role_id, staff.rol),
     roleLabel: staff.rol,
     name: `${staff.nombres} ${staff.apellidos}`.trim(),
   };
@@ -527,23 +590,7 @@ export const changeStaffPassword = async (payload: {
 }) => {
   await ensureStaffSecuritySchemaReady();
 
-  const rows = await prisma.$queryRaw<StaffLoginRawRow[]>`
-    SELECT
-      s.id::text AS id,
-      s.role_id,
-      s.rol,
-      s.nombres,
-      s.apellidos,
-      s.cedula,
-      s.estado,
-      c.password_hash
-    FROM public.staff s
-    LEFT JOIN public.staff_credentials c ON c.staff_id = s.id
-    WHERE s.cedula = ${payload.cedula}
-    LIMIT 1
-  `;
-
-  const staff = rows[0];
+  const staff = await getStaffLoginRowByCedulaWithTimeout(payload.cedula);
   if (!staff) {
     throw new StaffAuthError("Usuario no encontrado para actualizar contraseña.", 404);
   }
@@ -1444,6 +1491,103 @@ export const createStaffBalanceMovimiento = async (staffId: string, payload: Sta
       balanceHoras,
     };
   }, { timeout: 20000, maxWait: 10000 });
+};
+
+export const listStaffRecentActivity = async (staffId: string, limit = 30): Promise<StaffRecentActivityItem[]> => {
+  await ensureStaffHorarioLaboralSchemaReady();
+  await assertStaffExists(staffId);
+
+  const safeLimit = Number.isFinite(limit) ? Math.min(Math.max(Math.trunc(limit), 1), 100) : 30;
+
+  const rows = await prisma.$queryRaw<StaffRecentActivityRawRow[]>`
+    WITH attendance_events AS (
+      SELECT
+        CONCAT('attendance-entry:', r.id::text) AS id,
+        'attendance_entry'::text AS activity_type,
+        CASE
+          WHEN COALESCE(r.minutos_tarde, 0) > 0 THEN 'warning'::text
+          ELSE 'info'::text
+        END AS severity,
+        'Registro de entrada'::text AS title,
+        CASE
+          WHEN COALESCE(r.minutos_tarde, 0) > 0
+            THEN CONCAT('Llegada tardía: ', r.minutos_tarde::text, ' min.')
+          ELSE 'Entrada registrada correctamente.'
+        END AS message,
+        TO_CHAR(r.hora_entrada, 'YYYY-MM-DD"T"HH24:MI:SS.MS"Z"') AS created_at
+      FROM public.staff_registros_asistencia r
+      WHERE r.staff_id = ${staffId}::uuid
+        AND r.hora_entrada IS NOT NULL
+
+      UNION ALL
+
+      SELECT
+        CONCAT('attendance-exit:', r.id::text) AS id,
+        'attendance_exit'::text AS activity_type,
+        'info'::text AS severity,
+        'Registro de salida'::text AS title,
+        CASE
+          WHEN COALESCE(r.minutos_salida_anticipada, 0) > 0
+            THEN CONCAT('Salida anticipada: ', r.minutos_salida_anticipada::text, ' min antes del cierre.')
+          ELSE 'Salida registrada correctamente.'
+        END AS message,
+        TO_CHAR(r.hora_salida, 'YYYY-MM-DD"T"HH24:MI:SS.MS"Z"') AS created_at
+      FROM public.staff_registros_asistencia r
+      WHERE r.staff_id = ${staffId}::uuid
+        AND r.hora_salida IS NOT NULL
+    ),
+    room_events AS (
+      SELECT
+        CONCAT('room-action:', h.id::text) AS id,
+        CASE
+          WHEN h.action_type = 'salon_limpio' THEN 'room_clean'::text
+          WHEN h.action_type = 'danio_reportado' THEN 'room_report'::text
+          ELSE 'room_toggle'::text
+        END AS activity_type,
+        CASE
+          WHEN h.action_type = 'danio_reportado' THEN 'danger'::text
+          WHEN h.action_type = 'inhabilitado' THEN 'warning'::text
+          ELSE 'info'::text
+        END AS severity,
+        CASE
+          WHEN h.action_type = 'salon_limpio' THEN CONCAT(h.room_name, ' limpiado')
+          WHEN h.action_type = 'danio_reportado' THEN CONCAT('Reporte en ', h.room_name)
+          WHEN h.action_type = 'inhabilitado' THEN CONCAT(h.room_name, ' marcado como inhabilitado')
+          ELSE CONCAT(h.room_name, ' marcado como habilitado')
+        END AS title,
+        CASE
+          WHEN h.note IS NULL OR BTRIM(h.note) = ''
+            THEN 'Actividad registrada desde el panel de salones.'
+          ELSE CONCAT('Actividad: ', h.note)
+        END AS message,
+        TO_CHAR(h.created_at, 'YYYY-MM-DD"T"HH24:MI:SS.MS"Z"') AS created_at
+      FROM public.schedule_room_action_history h
+      WHERE h.created_by_staff_id = ${staffId}::uuid
+    )
+    SELECT
+      id,
+      activity_type,
+      severity,
+      title,
+      message,
+      created_at
+    FROM (
+      SELECT * FROM attendance_events
+      UNION ALL
+      SELECT * FROM room_events
+    ) AS activity_feed
+    ORDER BY created_at DESC, id DESC
+    LIMIT ${safeLimit}
+  `;
+
+  return rows.map((row) => ({
+    id: row.id,
+    activityType: row.activity_type,
+    severity: row.severity,
+    title: row.title,
+    message: row.message,
+    createdAt: row.created_at,
+  }));
 };
 
 export const getStaffHorarioLaboral = async (staffId: string) => {
