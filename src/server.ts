@@ -108,6 +108,7 @@ const PUBLIC_API_PATHS = new Set([
   "/staff/login",
   "/schedules/state",
   "/auditorio/public/reservas",
+  ...(!isProduction ? ["/staff/dev/create-monitor"] : []),
 ]);
 
 app.use("/api", (req, res, next) => {

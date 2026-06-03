@@ -2,7 +2,7 @@ import { prisma } from "../../lib/prisma";
 import { getRooms, getScheduleEvents } from "../schedules/service";
 import { listAllStaffJornadasSemanales, listAllStaffPausasProgramadas, listStaff } from "../staff/service";
 import { listReservationRequests, type ReservationRequestRow } from "../reservas/service";
-import { getAttendanceDashboard } from "../registro/service";
+import { getAttendanceDashboard, type ExpectedStaffEntry } from "../registro/service";
 
 type RoomCatalogItem = {
   id: string;
@@ -23,19 +23,7 @@ type RoomActionRow = {
   createdByRole: string | null;
 };
 
-type ScheduleEventRow = {
-  day: string;
-  room: string;
-  start: string;
-  end: string;
-  subject: string;
-  teacher: string;
-  faculty: string;
-  startDate?: string;
-  endDate?: string;
-  start_date?: string;
-  end_date?: string;
-};
+type ScheduleEventRow = Awaited<ReturnType<typeof getScheduleEvents>>[number];
 
 export type OperationsDashboardStaffItem = {
   id: string;
@@ -49,7 +37,7 @@ export type OperationsDashboardStaffItem = {
 
 export type OperationsDashboardLoanItem = {
   id: string;
-  resourceType: string;
+  resourceType: ReservationRequestRow["resourceType"];
   resourceLabel: string;
   resourceContext: string | null;
   destinationRoomLabel: string | null;
@@ -211,8 +199,8 @@ const isRoomOccupiedNow = (roomName: string, events: ScheduleEventRow[], now: Da
   const currentDayName = getTodayDayName(now);
 
   for (const event of events) {
-    const startDateText = event.startDate ?? event.start_date;
-    const endDateText = event.endDate ?? event.end_date;
+    const startDateText = event.startDate;
+    const endDateText = event.endDate;
 
     if (!event.room || !event.day || !event.start || !event.end || !startDateText || !endDateText) {
       continue;
@@ -333,8 +321,8 @@ const getNextClassForRoom = (roomName: string, events: ScheduleEventRow[], now: 
     const candidateDayName = getTodayDayName(candidateDate);
 
     for (const event of events) {
-      const startDateText = event.startDate ?? event.start_date;
-      const endDateText = event.endDate ?? event.end_date;
+      const startDateText = event.startDate;
+      const endDateText = event.endDate;
 
       if (!event.room || !event.day || !event.start || !event.end || !startDateText || !endDateText) {
         continue;
@@ -552,6 +540,7 @@ export const getOperationsDashboard = async (): Promise<OperationsDashboardRespo
     .slice(0, 8)
     .map((action) => {
       const room = roomPriorities.find((item) => roomKey(item.name) === roomKey(action.roomName));
+      const fallbackDisplayState: OperationsDashboardRoomItem["displayState"] = "limpio";
       return {
         ...room,
         id: room?.id ?? action.roomId,
@@ -566,8 +555,10 @@ export const getOperationsDashboard = async (): Promise<OperationsDashboardRespo
         minutesUntilNextClass: room?.minutesUntilNextClass ?? null,
         priorityScore: room?.priorityScore ?? 0,
         urgency: room?.urgency ?? "baja",
+        displayState: room?.displayState ?? fallbackDisplayState,
         reason: room?.reason ?? "Limpieza registrada recientemente",
         cleanedByName: action.createdByName ?? room?.cleanedByName ?? null,
+        occupiedNow: room?.occupiedNow ?? false,
       } satisfies OperationsDashboardRoomItem;
     });
 
@@ -579,7 +570,7 @@ export const getOperationsDashboard = async (): Promise<OperationsDashboardRespo
     .filter((reservation) => !containsGhostTestValue(reservation.resourceContext))
     .filter((reservation) => !containsGhostTestValue(reservation.destinationRoomLabel))
     .filter((reservation) => !containsGhostTestValue(reservation.requesterDocument))
-    .map((reservation) => {
+    .map<OperationsDashboardLoanItem | null>((reservation) => {
       const start = parseReservationDateTime(reservation.bookingDate, reservation.startTime);
       const end = parseReservationDateTime(reservation.bookingDate, reservation.endTime);
       if (!start || !end) {
@@ -608,9 +599,9 @@ export const getOperationsDashboard = async (): Promise<OperationsDashboardRespo
         badge,
         nextAction: action.nextAction,
         actionLabel: action.actionLabel,
-      } satisfies OperationsDashboardLoanItem;
+      };
     })
-    .filter((item): item is OperationsDashboardLoanItem => Boolean(item))
+    .filter((item): item is OperationsDashboardLoanItem => item !== null)
     .sort((left, right) => left.minutesUntilStart - right.minutesUntilStart)
     .slice(0, 10);
 
@@ -669,7 +660,7 @@ export const getOperationsDashboard = async (): Promise<OperationsDashboardRespo
         delayMinutes,
       };
     })
-    .filter((person): person is (typeof attendanceDashboard)["usuariosNoRegistradosAhora"][number] & { delayMinutes: number } => Boolean(person))
+    .filter((person): person is ExpectedStaffEntry & { delayMinutes: number } => person !== null)
     .filter((person) => person.delayMinutes >= 0)
     .sort((left, right) => right.delayMinutes - left.delayMinutes)
     .slice(0, 6);
