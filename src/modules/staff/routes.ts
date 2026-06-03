@@ -1,10 +1,11 @@
-import { Router } from "express";
+import { type Request, Router } from "express";
 import { z } from "zod";
 import { broadcastScheduleRefresh } from "../../lib/websocket";
 import { type AuthenticatedRequest, requireAdminRole, signAuthToken } from "../../lib/auth";
 import {
   authenticateStaffLogin,
   changeStaffPassword,
+  createStaffRefreshToken,
   createStaffBalanceMovimiento,
   createStaffPausaProgramada,
   createStaff,
@@ -23,6 +24,8 @@ import {
   listStaffPausasProgramadas,
   listStaff,
   replaceStaffJornadaSemanal,
+  revokeStaffRefreshToken,
+  rotateStaffRefreshToken,
   StaffAuthError,
   updateStaffPausaProgramada,
   updateStaff,
@@ -35,8 +38,77 @@ const dateRegex = /^\d{4}-\d{2}-\d{2}$/;
 const timeRegex = /^\d{2}:\d{2}$/;
 const weekDays = ["Lunes", "Martes", "Miercoles", "Jueves", "Viernes", "Sabado", "Domingo"] as const;
 const contractPlans = ["Plan 1", "Plan 2", "Plan 3", "Plan Monitoria", "Plan Especial"] as const;
+const REFRESH_COOKIE_NAME = "unac_refresh_token";
+const REFRESH_COOKIE_TTL_SECONDS = Math.max(7 * 24 * 60 * 60, Number.parseInt(process.env.AUTH_REFRESH_TOKEN_TTL_DAYS ?? "120", 10) * 24 * 60 * 60);
+const isProduction = process.env.NODE_ENV === "production";
 
 export const staffRouter = Router();
+
+const parseCookieValue = (cookieHeader: string, name: string): string | null => {
+  const targetPrefix = `${name}=`;
+  const parts = cookieHeader.split(";");
+
+  for (const part of parts) {
+    const trimmed = part.trim();
+    if (!trimmed.startsWith(targetPrefix)) {
+      continue;
+    }
+
+    const rawValue = trimmed.slice(targetPrefix.length);
+    if (!rawValue) {
+      return null;
+    }
+
+    try {
+      return decodeURIComponent(rawValue);
+    } catch {
+      return rawValue;
+    }
+  }
+
+  return null;
+};
+
+const getRefreshTokenFromRequest = (req: Request): string | null => {
+  const cookieHeader = req.headers.cookie;
+  if (!cookieHeader) {
+    return null;
+  }
+
+  return parseCookieValue(cookieHeader, REFRESH_COOKIE_NAME);
+};
+
+const buildRefreshCookieHeader = (token: string) => {
+  const segments = [
+    `${REFRESH_COOKIE_NAME}=${encodeURIComponent(token)}`,
+    "Path=/",
+    "HttpOnly",
+    "SameSite=Lax",
+    `Max-Age=${REFRESH_COOKIE_TTL_SECONDS}`,
+  ];
+
+  if (isProduction) {
+    segments.push("Secure");
+  }
+
+  return segments.join("; ");
+};
+
+const buildRefreshCookieClearHeader = () => {
+  const segments = [
+    `${REFRESH_COOKIE_NAME}=`,
+    "Path=/",
+    "HttpOnly",
+    "SameSite=Lax",
+    "Max-Age=0",
+  ];
+
+  if (isProduction) {
+    segments.push("Secure");
+  }
+
+  return segments.join("; ");
+};
 
 const idParamsSchema = z.object({
   id: z.string().uuid(),
@@ -389,6 +461,14 @@ staffRouter.post("/login", async (req, res, next) => {
       name: session.name,
     });
 
+    const issuedRefreshToken = await createStaffRefreshToken({
+      staffId: session.staffId,
+      ip: req.ip ?? null,
+      userAgent: req.get("user-agent") ?? null,
+    });
+
+    res.append("Set-Cookie", buildRefreshCookieHeader(issuedRefreshToken.token));
+
     return res.json({
       session: {
         ...session,
@@ -406,6 +486,58 @@ staffRouter.post("/login", async (req, res, next) => {
       return res.status(error.status).json({ error: error.message });
     }
 
+    return next(error);
+  }
+});
+
+staffRouter.post("/refresh", async (req, res, next) => {
+  try {
+    const incomingRefreshToken = getRefreshTokenFromRequest(req);
+    if (!incomingRefreshToken) {
+      return res.status(401).json({ error: "Sesion invalida o expirada" });
+    }
+
+    const rotated = await rotateStaffRefreshToken({
+      refreshToken: incomingRefreshToken,
+      ip: req.ip ?? null,
+      userAgent: req.get("user-agent") ?? null,
+    });
+
+    const accessToken = signAuthToken({
+      staffId: rotated.session.staffId,
+      cedula: rotated.session.cedula,
+      role: rotated.session.role,
+      roleLabel: rotated.session.roleLabel,
+      name: rotated.session.name,
+    });
+
+    res.append("Set-Cookie", buildRefreshCookieHeader(rotated.refreshToken));
+
+    return res.json({
+      session: {
+        ...rotated.session,
+        accessToken,
+      },
+    });
+  } catch (error) {
+    if (error instanceof StaffAuthError) {
+      return res.status(error.status).json({ error: error.message });
+    }
+
+    return next(error);
+  }
+});
+
+staffRouter.post("/logout", async (req, res, next) => {
+  try {
+    const incomingRefreshToken = getRefreshTokenFromRequest(req);
+    if (incomingRefreshToken) {
+      await revokeStaffRefreshToken(incomingRefreshToken);
+    }
+
+    res.append("Set-Cookie", buildRefreshCookieClearHeader());
+    return res.status(204).send();
+  } catch (error) {
     return next(error);
   }
 });
@@ -458,15 +590,15 @@ staffRouter.post("/dev/create-monitor", async (req, res, next) => {
 
     const exists = await getStaffByCedula("Monitor").catch(() => null);
     if (exists) {
-      if (exists.roleId === 4 && exists.rol?.toLowerCase().includes("registro")) {
-        return res.json({ message: "Monitor Registro user already exists", staffId: exists.id });
+      if (exists.roleId === 2 && exists.rol?.toLowerCase() === "monitor") {
+        return res.json({ message: "Monitor user already exists", staffId: exists.id });
       }
 
       const updated = await updateStaff({
         id: exists.id,
         numeroStaff: exists.numeroStaff,
-        roleId: 4,
-        rol: "Monitor Registro",
+        roleId: 2,
+        rol: "Monitor",
         nombres: exists.nombres,
         apellidos: exists.apellidos,
         cedula: exists.cedula,
@@ -488,12 +620,12 @@ staffRouter.post("/dev/create-monitor", async (req, res, next) => {
 
       broadcastScheduleRefresh();
 
-      return res.json({ message: "Monitor Registro user updated", staffId: updated.staffId });
+      return res.json({ message: "Monitor user updated", staffId: updated.staffId });
     }
 
     const created = await createStaff({
-      roleId: 4,
-      rol: "Monitor Registro",
+      roleId: 2,
+      rol: "Monitor",
       nombres: "Monitor",
       apellidos: "",
       cedula: "Monitor",
@@ -511,7 +643,7 @@ staffRouter.post("/dev/create-monitor", async (req, res, next) => {
 
     broadcastScheduleRefresh();
 
-    return res.status(201).json({ message: "Monitor Registro created", staffId: created.staffId });
+    return res.status(201).json({ message: "Monitor created", staffId: created.staffId });
   } catch (error) {
     return next(error);
   }
