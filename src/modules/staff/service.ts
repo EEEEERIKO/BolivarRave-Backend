@@ -1327,27 +1327,78 @@ export const replaceStaffJornadaSemanal = async (staffId: string, jornadas: Staf
       throw new Error("No se encontro el staff solicitado");
     }
 
-    await tx.$executeRaw`
-      DELETE FROM public.staff_jornada_semanal
-      WHERE staff_id = ${staffId}::uuid
-    `;
+    // Upsert each incoming jornada row by (staff_id, dia_semana).
+    // Done with manual SELECT + UPDATE/INSERT to avoid relying on a UNIQUE
+    // constraint that may not exist in the target DB yet.
+    const upsertedIds: string[] = [];
 
     for (const jornada of jornadas) {
+      const existing = await tx.$queryRaw<Array<{ id: string }>>`
+        SELECT id::text AS id
+        FROM public.staff_jornada_semanal
+        WHERE staff_id = ${staffId}::uuid
+          AND dia_semana = ${jornada.diaSemana}::public.dia_semana_enum
+        LIMIT 1
+      `;
+
+      if (existing[0]?.id) {
+        const rowId = existing[0].id;
+        await tx.$executeRaw`
+          UPDATE public.staff_jornada_semanal
+          SET hora_entrada    = ${jornada.horaEntrada}::time,
+              hora_salida     = ${jornada.horaSalida}::time,
+              total_horas_dia = ${jornada.totalHorasDia}
+          WHERE id = ${rowId}::uuid
+        `;
+        upsertedIds.push(rowId);
+      } else {
+        const inserted = await tx.$queryRaw<Array<{ id: string }>>`
+          INSERT INTO public.staff_jornada_semanal (
+            staff_id,
+            dia_semana,
+            hora_entrada,
+            hora_salida,
+            total_horas_dia
+          )
+          VALUES (
+            ${staffId}::uuid,
+            ${jornada.diaSemana}::public.dia_semana_enum,
+            ${jornada.horaEntrada}::time,
+            ${jornada.horaSalida}::time,
+            ${jornada.totalHorasDia}
+          )
+          RETURNING id::text AS id
+        `;
+        const newId = inserted[0]?.id;
+        if (newId) {
+          upsertedIds.push(newId);
+        }
+      }
+    }
+
+    // Remove days that were deleted by the user — but only when no attendance
+    // records reference them (avoids FK violation on staff_registros_asistencia).
+    if (upsertedIds.length > 0) {
       await tx.$executeRaw`
-        INSERT INTO public.staff_jornada_semanal (
-          staff_id,
-          dia_semana,
-          hora_entrada,
-          hora_salida,
-          total_horas_dia
-        )
-        VALUES (
-          ${staffId}::uuid,
-          ${jornada.diaSemana}::public.dia_semana_enum,
-          ${jornada.horaEntrada}::time,
-          ${jornada.horaSalida}::time,
-          ${jornada.totalHorasDia}
-        )
+        DELETE FROM public.staff_jornada_semanal
+        WHERE staff_id = ${staffId}::uuid
+          AND id::text <> ALL(${upsertedIds}::text[])
+          AND id NOT IN (
+            SELECT DISTINCT jornada_id
+            FROM public.staff_registros_asistencia
+            WHERE jornada_id IS NOT NULL
+          )
+      `;
+    } else {
+      // No jornadas in new payload: remove only unreferenced rows.
+      await tx.$executeRaw`
+        DELETE FROM public.staff_jornada_semanal
+        WHERE staff_id = ${staffId}::uuid
+          AND id NOT IN (
+            SELECT DISTINCT jornada_id
+            FROM public.staff_registros_asistencia
+            WHERE jornada_id IS NOT NULL
+          )
       `;
     }
 
