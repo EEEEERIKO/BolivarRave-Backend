@@ -234,6 +234,15 @@ const normalizeText = (value: string) =>
     .trim()
     .toLowerCase();
 
+const UUID_PATTERN = /^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i;
+
+const asUuidOrNull = (value: string | null | undefined): string | null => {
+  if (!value) return null;
+  const trimmed = value.trim();
+  if (!trimmed) return null;
+  return UUID_PATTERN.test(trimmed) ? trimmed : null;
+};
+
 const timeToMinutes = (value: string) => {
   const [hourText, minuteText] = value.split(":");
   const hour = Number(hourText);
@@ -456,7 +465,7 @@ const syncStaffBalanceMovementTx = async (
   staffId: string,
   horasDelta: number,
   motivo: string,
-  creadoPorStaffId: string,
+  creadoPorStaffId: string | null,
 ) => {
   await tx.$executeRaw`
     INSERT INTO public.staff_balance_movimientos (
@@ -469,7 +478,7 @@ const syncStaffBalanceMovementTx = async (
       ${staffId}::uuid,
       ${horasDelta},
       ${motivo},
-      ${creadoPorStaffId}::uuid
+      ${creadoPorStaffId ?? null}::uuid
     )
   `;
 
@@ -584,6 +593,7 @@ export const registerAttendanceEntryByCedula = async (cedula: string, creadoPorS
 
   const minutesLate = Math.max(0, today.minutes - jornadaInicio);
   const existing = await getAttendanceRowByJornada(staff.id, today.dateKey, jornadaActiva.id);
+  const creatorStaffId = asUuidOrNull(creadoPorStaffId) ?? asUuidOrNull(staff.id);
 
   if (existing?.horaEntrada && !existing.horaSalida) {
     throw new AttendanceError("Ya existe una entrada activa para esta jornada.", 409);
@@ -596,7 +606,7 @@ export const registerAttendanceEntryByCedula = async (cedula: string, creadoPorS
   const createdAt = toIsoTimestamp(new Date());
 
   const inserted = await prisma.$transaction(async (tx) => {
-    await tx.$executeRaw`
+    const insertedRows = await tx.$queryRaw<AttendanceRawRow[]>`
       INSERT INTO public.staff_registros_asistencia (
         staff_id,
         jornada_id,
@@ -619,6 +629,18 @@ export const registerAttendanceEntryByCedula = async (cedula: string, creadoPorS
         now(),
         now()
       )
+      RETURNING
+        id::text AS id,
+        staff_id::text AS staff_id,
+        jornada_id::text AS jornada_id,
+        TO_CHAR(fecha, 'YYYY-MM-DD') AS fecha,
+        TO_CHAR(hora_entrada, 'YYYY-MM-DD"T"HH24:MI:SS.MS"Z"') AS hora_entrada,
+        TO_CHAR(hora_salida, 'YYYY-MM-DD"T"HH24:MI:SS.MS"Z"') AS hora_salida,
+        minutos_tarde,
+        minutos_salida_anticipada,
+        minutos_balance,
+        TO_CHAR(created_at, 'YYYY-MM-DD"T"HH24:MI:SS.MS"Z"') AS created_at,
+        TO_CHAR(updated_at, 'YYYY-MM-DD"T"HH24:MI:SS.MS"Z"') AS updated_at
     `;
 
     if (minutesLate > 0) {
@@ -627,12 +649,11 @@ export const registerAttendanceEntryByCedula = async (cedula: string, creadoPorS
         staff.id,
         -(minutesLate / 60),
         `Tardanza de ${minutesLate} minuto(s) en registro de entrada (${today.dateKey}).`,
-        creadoPorStaffId,
+        creatorStaffId,
       );
     }
 
-    const records = await getAttendanceRowsForDate(staff.id, today.dateKey);
-    return records.find((record) => record.jornadaId === jornadaActiva.id) ?? null;
+    return mapAttendanceRows(insertedRows)[0] ?? null;
   });
 
   if (!inserted) {
@@ -676,9 +697,10 @@ export const registerAttendanceExitByCedula = async (cedula: string, creadoPorSt
   const jornadaFin = toMinutes(jornadaActiva.horaSalida);
   const minutesEarly = Math.max(0, jornadaFin - today.minutes);
   const updatedAt = toIsoTimestamp(new Date());
+  const creatorStaffId = asUuidOrNull(creadoPorStaffId) ?? asUuidOrNull(staff.id);
 
   const updated = await prisma.$transaction(async (tx) => {
-    await tx.$executeRaw`
+    const updatedRows = await tx.$queryRaw<AttendanceRawRow[]>`
       UPDATE public.staff_registros_asistencia
       SET
         hora_salida = ${updatedAt}::timestamptz,
@@ -686,6 +708,18 @@ export const registerAttendanceExitByCedula = async (cedula: string, creadoPorSt
         minutos_balance = ${registroAbierto.minutosTarde + minutesEarly},
         updated_at = now()
       WHERE id = ${registroAbierto.id}::uuid
+      RETURNING
+        id::text AS id,
+        staff_id::text AS staff_id,
+        jornada_id::text AS jornada_id,
+        TO_CHAR(fecha, 'YYYY-MM-DD') AS fecha,
+        TO_CHAR(hora_entrada, 'YYYY-MM-DD"T"HH24:MI:SS.MS"Z"') AS hora_entrada,
+        TO_CHAR(hora_salida, 'YYYY-MM-DD"T"HH24:MI:SS.MS"Z"') AS hora_salida,
+        minutos_tarde,
+        minutos_salida_anticipada,
+        minutos_balance,
+        TO_CHAR(created_at, 'YYYY-MM-DD"T"HH24:MI:SS.MS"Z"') AS created_at,
+        TO_CHAR(updated_at, 'YYYY-MM-DD"T"HH24:MI:SS.MS"Z"') AS updated_at
     `;
 
     if (minutesEarly > 0) {
@@ -694,12 +728,11 @@ export const registerAttendanceExitByCedula = async (cedula: string, creadoPorSt
         staff.id,
         -(minutesEarly / 60),
         `Salida anticipada de ${minutesEarly} minuto(s) en registro de salida (${today.dateKey}).`,
-        creadoPorStaffId,
+        creatorStaffId,
       );
     }
 
-    const records = await getAttendanceRowsForDate(staff.id, today.dateKey);
-    return records.find((record) => record.id === registroAbierto.id) ?? null;
+    return mapAttendanceRows(updatedRows)[0] ?? null;
   });
 
   if (!updated) {
