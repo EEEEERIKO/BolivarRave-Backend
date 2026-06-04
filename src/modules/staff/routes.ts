@@ -20,6 +20,7 @@ import {
   listStaffSkills,
   listAllStaffJornadasSemanales,
   listAllStaffPausasProgramadas,
+  listStaffRecentActivity,
   listStaffJornadaSemanal,
   listStaffPausasProgramadas,
   listStaff,
@@ -184,6 +185,10 @@ const balanceMovimientoBodySchema = z.object({
 
 const balanceMovimientosQuerySchema = z.object({
   limit: z.coerce.number().int().min(1).max(200).optional(),
+});
+
+const recentActivityQuerySchema = z.object({
+  limit: z.coerce.number().int().min(1).max(100).optional(),
 });
 
 const loginBodySchema = z.object({
@@ -439,6 +444,55 @@ staffRouter.get("/pausas-bulk", async (req, res, next) => {
     const pausasByStaffId = await listAllStaffPausasProgramadas();
     return res.json({ pausas: pausasByStaffId });
   } catch (error) {
+    return next(error);
+  }
+});
+
+staffRouter.get("/recent-activity", async (req, res, next) => {
+  try {
+    const query = recentActivityQuerySchema.parse(req.query);
+    const items = await listStaffRecentActivity(query.limit ?? 20);
+    return res.json({ items });
+  } catch (error) {
+    if (error instanceof z.ZodError) {
+      return res.status(400).json({
+        error: `Parametros invalidos: ${error.issues[0]?.message ?? "error de validacion"}`,
+      });
+    }
+
+    return next(error);
+  }
+});
+
+staffRouter.get("/activity/recent", async (req, res, next) => {
+  try {
+    const query = recentActivityQuerySchema.parse(req.query);
+    const items = await listStaffRecentActivity(query.limit ?? 20);
+    return res.json({ items });
+  } catch (error) {
+    if (error instanceof z.ZodError) {
+      return res.status(400).json({
+        error: `Parametros invalidos: ${error.issues[0]?.message ?? "error de validacion"}`,
+      });
+    }
+
+    return next(error);
+  }
+});
+
+staffRouter.get("/:id/activity/recent", async (req, res, next) => {
+  try {
+    const { id } = idParamsSchema.parse(req.params);
+    const query = recentActivityQuerySchema.parse(req.query);
+    const items = await listStaffRecentActivity(query.limit ?? 20, id);
+    return res.json({ items });
+  } catch (error) {
+    if (error instanceof z.ZodError) {
+      return res.status(400).json({
+        error: `Parametros invalidos: ${error.issues[0]?.message ?? "error de validacion"}`,
+      });
+    }
+
     return next(error);
   }
 });
