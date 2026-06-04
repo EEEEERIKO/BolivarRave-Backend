@@ -20,7 +20,6 @@ import {
   listStaffSkills,
   listAllStaffJornadasSemanales,
   listAllStaffPausasProgramadas,
-  listStaffRecentActivity,
   listStaffJornadaSemanal,
   listStaffPausasProgramadas,
   listStaff,
@@ -40,7 +39,9 @@ const timeRegex = /^\d{2}:\d{2}$/;
 const weekDays = ["Lunes", "Martes", "Miercoles", "Jueves", "Viernes", "Sabado", "Domingo"] as const;
 const contractPlans = ["Plan 1", "Plan 2", "Plan 3", "Plan Monitoria", "Plan Especial"] as const;
 const REFRESH_COOKIE_NAME = "unac_refresh_token";
-const REFRESH_COOKIE_TTL_SECONDS = Math.max(7 * 24 * 60 * 60, Number.parseInt(process.env.AUTH_REFRESH_TOKEN_TTL_DAYS ?? "120", 10) * 24 * 60 * 60);
+const refreshTokenTtlDaysRaw = Number.parseInt(process.env.AUTH_REFRESH_TOKEN_TTL_DAYS ?? "120", 10);
+const refreshTokenTtlDays = Number.isFinite(refreshTokenTtlDaysRaw) && refreshTokenTtlDaysRaw > 0 ? refreshTokenTtlDaysRaw : 120;
+const REFRESH_COOKIE_TTL_SECONDS = Math.max(7 * 24 * 60 * 60, refreshTokenTtlDays * 24 * 60 * 60);
 const isProduction = process.env.NODE_ENV === "production";
 
 export const staffRouter = Router();
@@ -185,10 +186,6 @@ const balanceMovimientoBodySchema = z.object({
 
 const balanceMovimientosQuerySchema = z.object({
   limit: z.coerce.number().int().min(1).max(200).optional(),
-});
-
-const recentActivityQuerySchema = z.object({
-  limit: z.coerce.number().int().min(1).max(100).optional(),
 });
 
 const loginBodySchema = z.object({
@@ -444,55 +441,6 @@ staffRouter.get("/pausas-bulk", async (req, res, next) => {
     const pausasByStaffId = await listAllStaffPausasProgramadas();
     return res.json({ pausas: pausasByStaffId });
   } catch (error) {
-    return next(error);
-  }
-});
-
-staffRouter.get("/recent-activity", async (req, res, next) => {
-  try {
-    const query = recentActivityQuerySchema.parse(req.query);
-    const items = await listStaffRecentActivity(query.limit ?? 20);
-    return res.json({ items });
-  } catch (error) {
-    if (error instanceof z.ZodError) {
-      return res.status(400).json({
-        error: `Parametros invalidos: ${error.issues[0]?.message ?? "error de validacion"}`,
-      });
-    }
-
-    return next(error);
-  }
-});
-
-staffRouter.get("/activity/recent", async (req, res, next) => {
-  try {
-    const query = recentActivityQuerySchema.parse(req.query);
-    const items = await listStaffRecentActivity(query.limit ?? 20);
-    return res.json({ items });
-  } catch (error) {
-    if (error instanceof z.ZodError) {
-      return res.status(400).json({
-        error: `Parametros invalidos: ${error.issues[0]?.message ?? "error de validacion"}`,
-      });
-    }
-
-    return next(error);
-  }
-});
-
-staffRouter.get("/:id/activity/recent", async (req, res, next) => {
-  try {
-    const { id } = idParamsSchema.parse(req.params);
-    const query = recentActivityQuerySchema.parse(req.query);
-    const items = await listStaffRecentActivity(query.limit ?? 20, id);
-    return res.json({ items });
-  } catch (error) {
-    if (error instanceof z.ZodError) {
-      return res.status(400).json({
-        error: `Parametros invalidos: ${error.issues[0]?.message ?? "error de validacion"}`,
-      });
-    }
-
     return next(error);
   }
 });
