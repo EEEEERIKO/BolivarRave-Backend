@@ -109,6 +109,11 @@ export type OperationsDashboardResponse = {
 };
 
 const DAY_NAMES = ["Domingo", "Lunes", "Martes", "Miercoles", "Jueves", "Viernes", "Sabado"] as const;
+const MINUTES_PER_DAY = 24 * 60;
+const WORK_START_MINUTE = 5 * 60;
+const WORK_END_MINUTE = 22 * 60;
+const REQUIRED_CLEANING_THRESHOLD_MINUTES = 5 * 60;
+const BOGOTA_UTC_OFFSET_MINUTES = -5 * 60;
 
 const normalizeText = (value: string) =>
   value
@@ -159,6 +164,14 @@ const parseReservationDateTime = (dateText: string | null | undefined, timeValue
   }
 
   return parseDateTime(datePart, timeValue);
+};
+
+const containsGhostTestValue = (value: string | null | undefined) => {
+  if (!value) {
+    return false;
+  }
+
+  return normalizeText(value).includes("test");
 };
 
 const formatDateTimeLabel = (value: Date) => {
@@ -249,14 +262,41 @@ const getBogotaClock = (date: Date) => {
   };
 };
 
-const isNightShiftWindow = (now: Date) => {
-  const hour = now.getHours();
-  return hour >= 20 || hour < 5;
-};
+const getWorkingMinutesElapsed = (start: Date | null, end: Date) => {
+  if (!start) {
+    return null;
+  }
 
-const isEarlyMorningNextDay = (date: Date) => {
-  const hour = date.getHours();
-  return hour >= 5 && hour <= 8;
+  const startMs = start.getTime();
+  const endMs = end.getTime();
+  if (!Number.isFinite(startMs) || !Number.isFinite(endMs) || endMs <= startMs) {
+    return 0;
+  }
+
+  const offsetMs = BOGOTA_UTC_OFFSET_MINUTES * 60 * 1000;
+  const localStartMs = startMs + offsetMs;
+  const localEndMs = endMs + offsetMs;
+  const dayMs = MINUTES_PER_DAY * 60 * 1000;
+
+  const startDayIndex = Math.floor(localStartMs / dayMs);
+  const endDayIndex = Math.floor(localEndMs / dayMs);
+
+  let totalMs = 0;
+
+  for (let dayIndex = startDayIndex; dayIndex <= endDayIndex; dayIndex += 1) {
+    const dayStartMs = dayIndex * dayMs;
+    const workStartMs = dayStartMs + WORK_START_MINUTE * 60 * 1000;
+    const workEndMs = dayStartMs + WORK_END_MINUTE * 60 * 1000;
+
+    const windowStart = Math.max(localStartMs, workStartMs);
+    const windowEnd = Math.min(localEndMs, workEndMs);
+
+    if (windowEnd > windowStart) {
+      totalMs += windowEnd - windowStart;
+    }
+  }
+
+  return Math.max(0, Math.round(totalMs / 60000));
 };
 
 const safe = async <T>(promise: Promise<T>, fallback: T): Promise<T> => {
@@ -377,55 +417,40 @@ const computeRoomPriority = (
   const occupiedNow = isRoomOccupiedNow(room.name, events, now);
 
   const lastCleanAtDate = lastClean ? new Date(lastClean.createdAt) : null;
-  const minutesSinceLastClean = lastCleanAtDate ? Math.max(0, Math.round((now.getTime() - lastCleanAtDate.getTime()) / 60000)) : null;
+  const minutesSinceLastClean = getWorkingMinutesElapsed(lastCleanAtDate, now);
 
   let minutesUntilNextClass: number | null = null;
-  let effectiveMinutesUntilNextClass: number | null = null;
 
   if (nextClass) {
     minutesUntilNextClass = Math.max(0, Math.round((nextClass.start.getTime() - now.getTime()) / 60000));
-    effectiveMinutesUntilNextClass = minutesUntilNextClass;
-
-    if (isNightShiftWindow(now) && isEarlyMorningNextDay(nextClass.start) && nextClass.start.getDate() !== now.getDate()) {
-      effectiveMinutesUntilNextClass = Math.min(minutesUntilNextClass, 120);
-    }
   }
 
-  const staleScore = minutesSinceLastClean === null ? 80 : Math.min(100, Math.max(0, minutesSinceLastClean / 3));
-  const urgencyScore = effectiveMinutesUntilNextClass === null
-    ? 0
-    : effectiveMinutesUntilNextClass <= 60
-      ? 120
-      : effectiveMinutesUntilNextClass <= 120
-        ? 80
-        : effectiveMinutesUntilNextClass <= 240
-          ? 40
-          : 0;
-  const damageScore = lastDamage ? 80 : 0;
-  const score = staleScore + urgencyScore + damageScore;
+  const hasClassSoon = minutesUntilNextClass !== null && minutesUntilNextClass <= 60;
+  const staleMinutesForRanking = minutesSinceLastClean ?? Number.MAX_SAFE_INTEGER;
+  const score = staleMinutesForRanking + (hasClassSoon ? 500 : 0);
 
-  let urgency: OperationsDashboardRoomItem["urgency"] = "baja";
-  if (score >= 180) urgency = "inmediata";
-  else if (score >= 120) urgency = "alta";
-  else if (score >= 70) urgency = "media";
-  else if (score > 0) urgency = "baja";
-  else urgency = "limpio";
+  const baseState: OperationsDashboardRoomItem["displayState"] =
+    minutesSinceLastClean === null || minutesSinceLastClean >= REQUIRED_CLEANING_THRESHOLD_MINUTES
+      ? "requerido"
+      : "recomendado";
+
+  const displayState: OperationsDashboardRoomItem["displayState"] = occupiedNow ? "ocupado" : baseState;
+
+  const urgency: OperationsDashboardRoomItem["urgency"] =
+    displayState === "requerido"
+      ? "alta"
+      : displayState === "recomendado"
+        ? "media"
+        : "baja";
 
   let reason = "Sin acción prioritaria";
-  if (lastDamage) {
-    reason = `Reporte de daño recibido hace ${Math.max(0, Math.round((now.getTime() - new Date(lastDamage.createdAt).getTime()) / 60000))} min`;
-  } else if (minutesSinceLastClean !== null && minutesSinceLastClean >= 240) {
-    reason = `Último aseo hace ${Math.round(minutesSinceLastClean / 60)} h`;
-  } else if (effectiveMinutesUntilNextClass !== null && effectiveMinutesUntilNextClass <= 120) {
-    reason = `Próxima clase en ${effectiveMinutesUntilNextClass} min`;
-  } else if (minutesSinceLastClean !== null) {
-    reason = `Último aseo hace ${Math.round(minutesSinceLastClean / 60)} h`;
+  if (minutesSinceLastClean === null) {
+    reason = "Sin registro de aseo reciente";
+  } else if (hasClassSoon) {
+    reason = `Próxima clase en ${minutesUntilNextClass} min · último aseo hace ${Math.round(minutesSinceLastClean / 60)} h laborales`;
+  } else {
+    reason = `Último aseo hace ${Math.round(minutesSinceLastClean / 60)} h laborales`;
   }
-
-  const needsCleaning = urgency !== "limpio";
-  const displayState: OperationsDashboardRoomItem["displayState"] = needsCleaning
-    ? (occupiedNow ? "ocupado" : (urgency === "inmediata" || urgency === "alta" ? "requerido" : "recomendado"))
-    : "limpio";
 
   return {
     id: room.id,
@@ -437,7 +462,7 @@ const computeRoomPriority = (
     nextClassAt: nextClass ? formatDateTimeLabel(nextClass.start) : null,
     nextClassLabel: nextClass ? `${getTodayDayName(nextClass.start)} ${formatTimeAmPm(`${String(nextClass.start.getHours()).padStart(2, "0")}:${String(nextClass.start.getMinutes()).padStart(2, "0")}`)}` : null,
     minutesSinceLastClean,
-    minutesUntilNextClass: effectiveMinutesUntilNextClass,
+    minutesUntilNextClass,
     priorityScore: Math.round(score),
     urgency,
     displayState,
@@ -445,6 +470,13 @@ const computeRoomPriority = (
     cleanedByName: lastClean?.createdByName ?? null,
     occupiedNow,
   } satisfies OperationsDashboardRoomItem;
+};
+
+const roomDisplayPriorityRank: Record<OperationsDashboardRoomItem["displayState"], number> = {
+  requerido: 3,
+  recomendado: 2,
+  ocupado: 1,
+  limpio: 0,
 };
 
 const getLoanBadge = (minutesUntilStart: number, minutesUntilEnd: number, status: string): OperationsDashboardLoanItem["badge"] => {
@@ -524,9 +556,37 @@ export const getOperationsDashboard = async (): Promise<OperationsDashboardRespo
   }
 
   const roomPriorities = catalog.map((room) => computeRoomPriority(room, events, latestCleanByRoom, latestDamageByRoom, now));
-  roomPriorities.sort((left, right) => right.priorityScore - left.priorityScore || left.name.localeCompare(right.name));
+  roomPriorities.sort((left, right) => {
+    const statePriorityDiff = roomDisplayPriorityRank[right.displayState] - roomDisplayPriorityRank[left.displayState];
+    if (statePriorityDiff !== 0) {
+      return statePriorityDiff;
+    }
 
-  const urgentRooms = roomPriorities.filter((room) => room.urgency !== "limpio").slice(0, 8);
+    const leftStaleMinutes = left.minutesSinceLastClean ?? Number.MAX_SAFE_INTEGER;
+    const rightStaleMinutes = right.minutesSinceLastClean ?? Number.MAX_SAFE_INTEGER;
+    const staleDiff = rightStaleMinutes - leftStaleMinutes;
+    if (staleDiff !== 0) {
+      return staleDiff;
+    }
+
+    const leftHasClassSoon = left.minutesUntilNextClass !== null && left.minutesUntilNextClass <= 60 ? 1 : 0;
+    const rightHasClassSoon = right.minutesUntilNextClass !== null && right.minutesUntilNextClass <= 60 ? 1 : 0;
+    const classSoonDiff = rightHasClassSoon - leftHasClassSoon;
+    if (classSoonDiff !== 0) {
+      return classSoonDiff;
+    }
+
+    const leftMinutesUntilClass = left.minutesUntilNextClass ?? Number.MAX_SAFE_INTEGER;
+    const rightMinutesUntilClass = right.minutesUntilNextClass ?? Number.MAX_SAFE_INTEGER;
+    const nextClassDiff = leftMinutesUntilClass - rightMinutesUntilClass;
+    if (nextClassDiff !== 0) {
+      return nextClassDiff;
+    }
+
+    return right.priorityScore - left.priorityScore || left.name.localeCompare(right.name);
+  });
+
+  const urgentRooms = roomPriorities.slice(0, 8);
   const topCleanTasks = actions
     .filter((action) => action.actionType === "salon_limpio")
     .slice(0, 8)
@@ -555,8 +615,13 @@ export const getOperationsDashboard = async (): Promise<OperationsDashboardRespo
     });
 
   const activeLoans = reservations
-    .filter((reservation) => normalizeText(String(reservation.resourceType ?? "")) !== "rooms")
-    .filter((reservation) => ["no_aceptado", "confirmada", "reportado"].includes(normalizeText(String(reservation.status ?? ""))))
+    .filter((reservation) => reservation.resourceType === "equipment" || reservation.resourceType === "televisor")
+    .filter((reservation) => ["no_aceptado", "confirmada", "reportado"].includes(reservation.status))
+    .filter((reservation) => !containsGhostTestValue(reservation.resourceLabel))
+    .filter((reservation) => !containsGhostTestValue(reservation.requesterName))
+    .filter((reservation) => !containsGhostTestValue(reservation.resourceContext))
+    .filter((reservation) => !containsGhostTestValue(reservation.destinationRoomLabel))
+    .filter((reservation) => !containsGhostTestValue(reservation.requesterDocument))
     .map<OperationsDashboardLoanItem | null>((reservation) => {
       const start = parseReservationDateTime(reservation.bookingDate, reservation.startTime);
       const end = parseReservationDateTime(reservation.bookingDate, reservation.endTime);

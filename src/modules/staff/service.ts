@@ -151,44 +151,7 @@ type StaffRefreshTokenRow = {
   revoked_at: string | null;
 };
 
-type StaffRecentActivityRawRow = {
-  id: string;
-  staff_id: string | null;
-  activity_type: string;
-  severity: "success" | "warning";
-  title: string;
-  description: string;
-  actor_name: string | null;
-  created_at: string;
-};
-
-export type StaffRecentActivityItem = {
-  id: string;
-  staffId: string | null;
-  activityType:
-    | "asistencia_entrada"
-    | "asistencia_salida"
-    | "salon_danio"
-    | "salon_limpio"
-    | "salon_inhabilitado"
-    | "salon_habilitado";
-  severity: "success" | "warning";
-  title: string;
-  description: string;
-  actorName: string | null;
-  createdAt: string;
-};
-
 const REFRESH_TOKEN_TTL_DAYS = Math.max(7, Number.parseInt(process.env.AUTH_REFRESH_TOKEN_TTL_DAYS ?? "120", 10) || 120);
-
-const isMissingRelationError = (error: unknown, relationName: string) => {
-  if (!(error instanceof Error)) {
-    return false;
-  }
-
-  const normalized = error.message.toLowerCase();
-  return normalized.includes("42p01") && normalized.includes(relationName.toLowerCase());
-};
 
 export class StaffAuthError extends Error {
   readonly status: number;
@@ -1364,78 +1327,27 @@ export const replaceStaffJornadaSemanal = async (staffId: string, jornadas: Staf
       throw new Error("No se encontro el staff solicitado");
     }
 
-    // Upsert each incoming jornada row by (staff_id, dia_semana).
-    // Done with manual SELECT + UPDATE/INSERT to avoid relying on a UNIQUE
-    // constraint that may not exist in the target DB yet.
-    const upsertedIds: string[] = [];
+    await tx.$executeRaw`
+      DELETE FROM public.staff_jornada_semanal
+      WHERE staff_id = ${staffId}::uuid
+    `;
 
     for (const jornada of jornadas) {
-      const existing = await tx.$queryRaw<Array<{ id: string }>>`
-        SELECT id::text AS id
-        FROM public.staff_jornada_semanal
-        WHERE staff_id = ${staffId}::uuid
-          AND dia_semana = ${jornada.diaSemana}::public.dia_semana_enum
-        LIMIT 1
-      `;
-
-      if (existing[0]?.id) {
-        const rowId = existing[0].id;
-        await tx.$executeRaw`
-          UPDATE public.staff_jornada_semanal
-          SET hora_entrada    = ${jornada.horaEntrada}::time,
-              hora_salida     = ${jornada.horaSalida}::time,
-              total_horas_dia = ${jornada.totalHorasDia}
-          WHERE id = ${rowId}::uuid
-        `;
-        upsertedIds.push(rowId);
-      } else {
-        const inserted = await tx.$queryRaw<Array<{ id: string }>>`
-          INSERT INTO public.staff_jornada_semanal (
-            staff_id,
-            dia_semana,
-            hora_entrada,
-            hora_salida,
-            total_horas_dia
-          )
-          VALUES (
-            ${staffId}::uuid,
-            ${jornada.diaSemana}::public.dia_semana_enum,
-            ${jornada.horaEntrada}::time,
-            ${jornada.horaSalida}::time,
-            ${jornada.totalHorasDia}
-          )
-          RETURNING id::text AS id
-        `;
-        const newId = inserted[0]?.id;
-        if (newId) {
-          upsertedIds.push(newId);
-        }
-      }
-    }
-
-    // Remove days that were deleted by the user — but only when no attendance
-    // records reference them (avoids FK violation on staff_registros_asistencia).
-    if (upsertedIds.length > 0) {
       await tx.$executeRaw`
-        DELETE FROM public.staff_jornada_semanal
-        WHERE staff_id = ${staffId}::uuid
-          AND id::text <> ALL(${upsertedIds}::text[])
-          AND id NOT IN (
-            SELECT DISTINCT jornada_id
-            FROM public.staff_registros_asistencia
-            WHERE jornada_id IS NOT NULL
-          )
-      `;
-    } else {
-      // No jornadas in new payload: remove only unreferenced rows.
-      await tx.$executeRaw`
-        DELETE FROM public.staff_jornada_semanal
-        WHERE staff_id = ${staffId}::uuid
-          AND id NOT IN (
-            SELECT DISTINCT jornada_id
-            FROM public.staff_registros_asistencia
-            WHERE jornada_id IS NOT NULL
-          )
+        INSERT INTO public.staff_jornada_semanal (
+          staff_id,
+          dia_semana,
+          hora_entrada,
+          hora_salida,
+          total_horas_dia
+        )
+        VALUES (
+          ${staffId}::uuid,
+          ${jornada.diaSemana}::public.dia_semana_enum,
+          ${jornada.horaEntrada}::time,
+          ${jornada.horaSalida}::time,
+          ${jornada.totalHorasDia}
+        )
       `;
     }
 
@@ -1749,153 +1661,4 @@ export const getStaffHorarioLaboral = async (staffId: string) => {
     pausasProgramadas: pausas,
     resumenContrato: resumen,
   };
-};
-
-export const listStaffRecentActivity = async (limit = 20, staffId?: string): Promise<StaffRecentActivityItem[]> => {
-  if (staffId) {
-    await assertStaffExists(staffId);
-  }
-
-  const safeLimit = Number.isFinite(limit) ? Math.min(Math.max(Math.trunc(limit), 1), 100) : 20;
-
-  const attendanceRowsPromise = prisma.$queryRaw<StaffRecentActivityRawRow[]>`
-    SELECT
-      movement.id,
-      movement.staff_id,
-      movement.activity_type,
-      movement.severity,
-      movement.title,
-      movement.description,
-      movement.actor_name,
-      movement.created_at
-    FROM (
-      SELECT
-        CONCAT(r.id::text, '-entrada') AS id,
-        r.staff_id::text AS staff_id,
-        'asistencia_entrada'::text AS activity_type,
-        CASE WHEN r.minutos_tarde > 0 THEN 'warning'::text ELSE 'success'::text END AS severity,
-        CASE
-          WHEN r.minutos_tarde > 0 THEN 'Entrada tardia registrada'
-          ELSE 'Entrada registrada a tiempo'
-        END AS title,
-        CASE
-          WHEN r.minutos_tarde > 0 THEN CONCAT('Retraso de ', r.minutos_tarde::text, ' min.')
-          ELSE 'Sin retraso en la hora de llegada.'
-        END AS description,
-        CONCAT(s.nombres, ' ', s.apellidos) AS actor_name,
-        TO_CHAR(r.hora_entrada, 'YYYY-MM-DD"T"HH24:MI:SS.MS"Z"') AS created_at,
-        r.hora_entrada AS moment
-      FROM public.staff_registros_asistencia r
-      INNER JOIN public.staff s ON s.id = r.staff_id
-      WHERE r.hora_entrada IS NOT NULL
-        AND (${staffId ?? null}::uuid IS NULL OR r.staff_id = ${staffId ?? null}::uuid)
-
-      UNION ALL
-
-      SELECT
-        CONCAT(r.id::text, '-salida') AS id,
-        r.staff_id::text AS staff_id,
-        'asistencia_salida'::text AS activity_type,
-        CASE WHEN r.minutos_salida_anticipada > 0 THEN 'warning'::text ELSE 'success'::text END AS severity,
-        CASE
-          WHEN r.minutos_salida_anticipada > 0 THEN 'Salida anticipada registrada'
-          ELSE 'Salida registrada a tiempo'
-        END AS title,
-        CASE
-          WHEN r.minutos_salida_anticipada > 0 THEN CONCAT('Salida ', r.minutos_salida_anticipada::text, ' min antes del cierre.')
-          ELSE 'Jornada cerrada sin novedad.'
-        END AS description,
-        CONCAT(s.nombres, ' ', s.apellidos) AS actor_name,
-        TO_CHAR(r.hora_salida, 'YYYY-MM-DD"T"HH24:MI:SS.MS"Z"') AS created_at,
-        r.hora_salida AS moment
-      FROM public.staff_registros_asistencia r
-      INNER JOIN public.staff s ON s.id = r.staff_id
-      WHERE r.hora_salida IS NOT NULL
-        AND (${staffId ?? null}::uuid IS NULL OR r.staff_id = ${staffId ?? null}::uuid)
-    ) AS movement
-    ORDER BY movement.moment DESC
-    LIMIT ${safeLimit}
-  `;
-
-  const roomRowsPromise = prisma.$queryRaw<StaffRecentActivityRawRow[]>`
-    SELECT
-      h.id::text AS id,
-      h.created_by_staff_id::text AS staff_id,
-      CASE h.action_type
-        WHEN 'danio_reportado' THEN 'salon_danio'
-        WHEN 'salon_limpio' THEN 'salon_limpio'
-        WHEN 'inhabilitado' THEN 'salon_inhabilitado'
-        ELSE 'salon_habilitado'
-      END AS activity_type,
-      CASE
-        WHEN h.action_type IN ('danio_reportado', 'inhabilitado') THEN 'warning'::text
-        ELSE 'success'::text
-      END AS severity,
-      CASE h.action_type
-        WHEN 'danio_reportado' THEN CONCAT('Danio reportado en ', h.room_name)
-        WHEN 'salon_limpio' THEN CONCAT(h.room_name, ' limpiado')
-        WHEN 'inhabilitado' THEN CONCAT(h.room_name, ' inhabilitado')
-        ELSE CONCAT(h.room_name, ' habilitado')
-      END AS title,
-      COALESCE(
-        NULLIF(BTRIM(h.note), ''),
-        CASE h.action_type
-          WHEN 'danio_reportado' THEN 'Se reporto un incidente en el salon.'
-          WHEN 'salon_limpio' THEN 'Actividad de limpieza registrada.'
-          WHEN 'inhabilitado' THEN 'Salon marcado como no disponible.'
-          ELSE 'Salon devuelto a disponibilidad.'
-        END
-      ) AS description,
-      h.created_by_name AS actor_name,
-      TO_CHAR(h.created_at, 'YYYY-MM-DD"T"HH24:MI:SS.MS"Z"') AS created_at
-    FROM public.schedule_room_action_history h
-    WHERE (
-      ${staffId ?? null}::uuid IS NULL
-      OR h.created_by_staff_id = ${staffId ?? null}::uuid
-      OR (
-        h.created_by_staff_id IS NULL
-        AND EXISTS (
-          SELECT 1
-          FROM public.staff s
-          WHERE s.id = ${staffId ?? null}::uuid
-            AND LOWER(BTRIM(COALESCE(h.created_by_name, ''))) = LOWER(BTRIM(CONCAT(s.nombres, ' ', s.apellidos)))
-        )
-      )
-    )
-    ORDER BY h.created_at DESC
-    LIMIT ${safeLimit}
-  `;
-
-  let attendanceRows: StaffRecentActivityRawRow[] = [];
-  let roomRows: StaffRecentActivityRawRow[] = [];
-
-  try {
-    attendanceRows = await attendanceRowsPromise;
-  } catch (error) {
-    if (!isMissingRelationError(error, "staff_registros_asistencia")) {
-      throw error;
-    }
-  }
-
-  try {
-    roomRows = await roomRowsPromise;
-  } catch (error) {
-    if (!isMissingRelationError(error, "schedule_room_action_history")) {
-      throw error;
-    }
-  }
-
-  return [...attendanceRows, ...roomRows]
-    .sort((left, right) => new Date(right.created_at).getTime() - new Date(left.created_at).getTime())
-    .slice(0, safeLimit)
-    .map((row) => ({
-      id: row.id,
-      staffId: row.staff_id,
-      activityType: row.activity_type as StaffRecentActivityItem["activityType"],
-      severity: row.severity,
-      title: row.title,
-      description: row.description,
-      actorName: row.actor_name,
-      createdAt: row.created_at,
-    }));
 };
