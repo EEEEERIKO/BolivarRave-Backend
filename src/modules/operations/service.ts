@@ -161,14 +161,6 @@ const parseReservationDateTime = (dateText: string | null | undefined, timeValue
   return parseDateTime(datePart, timeValue);
 };
 
-const containsGhostTestValue = (value: string | null | undefined) => {
-  if (!value) {
-    return false;
-  }
-
-  return normalizeText(value).includes("test");
-};
-
 const formatDateTimeLabel = (value: Date) => {
   const year = value.getFullYear();
   const month = String(value.getMonth() + 1).padStart(2, "0");
@@ -563,13 +555,8 @@ export const getOperationsDashboard = async (): Promise<OperationsDashboardRespo
     });
 
   const activeLoans = reservations
-    .filter((reservation) => reservation.resourceType === "equipment" || reservation.resourceType === "televisor")
-    .filter((reservation) => ["no_aceptado", "confirmada", "reportado"].includes(reservation.status))
-    .filter((reservation) => !containsGhostTestValue(reservation.resourceLabel))
-    .filter((reservation) => !containsGhostTestValue(reservation.requesterName))
-    .filter((reservation) => !containsGhostTestValue(reservation.resourceContext))
-    .filter((reservation) => !containsGhostTestValue(reservation.destinationRoomLabel))
-    .filter((reservation) => !containsGhostTestValue(reservation.requesterDocument))
+    .filter((reservation) => normalizeText(String(reservation.resourceType ?? "")) !== "rooms")
+    .filter((reservation) => ["no_aceptado", "confirmada", "reportado"].includes(normalizeText(String(reservation.status ?? ""))))
     .map<OperationsDashboardLoanItem | null>((reservation) => {
       const start = parseReservationDateTime(reservation.bookingDate, reservation.startTime);
       const end = parseReservationDateTime(reservation.bookingDate, reservation.endTime);
