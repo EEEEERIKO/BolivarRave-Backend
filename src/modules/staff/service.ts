@@ -551,6 +551,14 @@ export const authenticateStaffLogin = async (payload: {
 }): Promise<StaffLoginResult> => {
   await ensureStaffSecuritySchemaReady();
 
+  console.log("Intentando login:", payload.cedula);
+
+  const testConnection = await prisma.$queryRaw`
+    SELECT NOW();
+  `;
+
+  console.log("DB responde:", testConnection);
+
   const rows = await prisma.$queryRaw<StaffLoginRawRow[]>`
     SELECT
       s.id::text AS id,
@@ -827,7 +835,7 @@ export const getStaffById = async (id: string) => {
 
   const rows = await prisma.$queryRaw<StaffRawRow[]>`
     SELECT
-      s.id::text AS id,
+      s.id::text AS id, 
       s.numero_staff,
       s.role_id,
       s.rol,

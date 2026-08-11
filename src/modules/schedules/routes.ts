@@ -360,6 +360,7 @@ const handleKnownScheduleWriteError = (error: unknown, res: import("express").Re
 };
 
 schedulesRouter.post("/import-parsed", requireAdminRole, async (req, res, next) => {
+  const start = Date.now();
   try {
     const parsed = parsedImportSchema.parse(req.body);
 
@@ -369,23 +370,62 @@ schedulesRouter.post("/import-parsed", requireAdminRole, async (req, res, next) 
       endDate: toLocalDate(row.endDate),
     }));
 
-    const result = await replaceAllSchedulesFromRows(parsed.sourceFile, rows, parsed.meta);
+    // const result = await replaceAllSchedulesFromRows(parsed.sourceFile, rows, parsed.meta);
 
-    // Notificar a todos los clientes que se refresquen
+    // // Notificar a todos los clientes que se refresquen
+    // broadcastScheduleRefresh();
+
+    // return res.status(201).json({
+    //   message: "Horario importado correctamente",
+    //   import: {
+    //     id: result.importBatch.id,
+    //     sourceFile: result.importBatch.sourceFile,
+    //     importedAt: result.importBatch.importedAt,
+    //     rowsCount: result.rowsCount,
+    //     classesCount: result.classesCount,
+    //     slotsCount: result.slotsCount,
+    //   },
+    // });
+    const result = await replaceAllSchedulesFromRows(parsed.sourceFile, rows, parsed.meta);
+    console.log("[IMPORT-PARSED] RESULT COMPLETO", result);
+    console.log("[IMPORT] replace terminado", result);
+
     broadcastScheduleRefresh();
 
-    return res.status(201).json({
-      message: "Horario importado correctamente",
-      import: {
-        id: result.importBatch.id,
-        sourceFile: result.importBatch.sourceFile,
-        importedAt: result.importBatch.importedAt,
-        rowsCount: result.rowsCount,
-        classesCount: result.classesCount,
-        slotsCount: result.slotsCount,
-      },
-    });
+    console.log("[IMPORT] preparando respuesta", {
+  id: result.importBatch.id,
+  sourceFile: result.importBatch.sourceFile,
+  importedAt: result.importBatch.importedAt,
+  rowsCount: result.rowsCount,
+  classesCount: result.classesCount,
+  slotsCount: result.slotsCount,
+});
+
+const responsePayload = {
+  message: "Horario importado correctamente",
+  import: {
+    id: result.importBatch.id,
+    sourceFile: result.importBatch.sourceFile,
+    importedAt: result.importBatch.importedAt,
+    rowsCount: result.rowsCount,
+    classesCount: result.classesCount,
+    slotsCount: result.slotsCount,
+  },
+};
+
+console.log("[IMPORT] JSON listo", responsePayload);
+
+res.status(201).json(responsePayload);
+console.log(
+  "[IMPORT] Duración total:",
+  Date.now() - start,
+  "ms"
+);
+console.log("[IMPORT] respuesta enviada");
+return;
+
   } catch (error) {
+    console.error("[IMPORT-PARSED RAW ERROR]", error);
     if (error instanceof z.ZodError) {
       return res.status(400).json({
         error: `Payload de importacion invalido: ${error.issues[0]?.message ?? "error de validacion"}`,
@@ -442,7 +482,12 @@ schedulesRouter.post("/import", requireAdminRole, upload.single("file"), async (
     const result = await replaceAllSchedulesFromRows(req.file.originalname, rows);
 
     // Notificar a todos los clientes que se refresquen
-    broadcastScheduleRefresh();
+    //broadcastScheduleRefresh();
+    try {
+      broadcastScheduleRefresh();
+    } catch (error) {
+      console.error("[WebSocket] Error enviando refresh", error);
+    }
 
     return res.status(201).json({
       message: "Horario importado correctamente",
