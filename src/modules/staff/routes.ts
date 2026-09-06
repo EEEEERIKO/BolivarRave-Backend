@@ -39,7 +39,7 @@ const timeRegex = /^\d{2}:\d{2}$/;
 const weekDays = ["Lunes", "Martes", "Miercoles", "Jueves", "Viernes", "Sabado", "Domingo"] as const;
 const contractPlans = ["Plan 1", "Plan 2", "Plan 3", "Plan Monitoria", "Plan Especial"] as const;
 const REFRESH_COOKIE_NAME = "unac_refresh_token";
-const refreshTokenTtlDaysRaw = Number.parseInt(process.env.AUTH_REFRESH_TOKEN_TTL_DAYS ?? "120", 10);
+const refreshTokenTtlDaysRaw = Number.parseInt(process.env.AUTH_REFRESH_TOKEN_TTL_DAYS ?? "3650", 10);
 const refreshTokenTtlDays = Number.isFinite(refreshTokenTtlDaysRaw) && refreshTokenTtlDaysRaw > 0 ? refreshTokenTtlDaysRaw : 120;
 const REFRESH_COOKIE_TTL_SECONDS = Math.max(7 * 24 * 60 * 60, refreshTokenTtlDays * 24 * 60 * 60);
 const isProduction = process.env.NODE_ENV === "production";

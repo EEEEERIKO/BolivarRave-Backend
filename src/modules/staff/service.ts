@@ -151,7 +151,7 @@ type StaffRefreshTokenRow = {
   revoked_at: string | null;
 };
 
-const REFRESH_TOKEN_TTL_DAYS = Math.max(7, Number.parseInt(process.env.AUTH_REFRESH_TOKEN_TTL_DAYS ?? "120", 10) || 120);
+const REFRESH_TOKEN_TTL_DAYS = Math.max(7, Number.parseInt(process.env.AUTH_REFRESH_TOKEN_TTL_DAYS ?? "3650", 10) || 3650);
 
 export class StaffAuthError extends Error {
   readonly status: number;
