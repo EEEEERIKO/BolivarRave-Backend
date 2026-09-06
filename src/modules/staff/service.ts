@@ -1323,7 +1323,6 @@ export const replaceStaffJornadaSemanal = async (staffId: string, jornadas: Staf
   await ensureStaffHorarioLaboralSchemaReady();
 
   return prisma.$transaction(async (tx) => {
-
     const existing = await tx.$queryRaw<Array<{ id: string }>>`
       SELECT id::text AS id
       FROM public.staff
@@ -1335,32 +1334,68 @@ export const replaceStaffJornadaSemanal = async (staffId: string, jornadas: Staf
       throw new Error("No se encontro el staff solicitado");
     }
 
-    await tx.$executeRaw`
-      DELETE FROM public.staff_jornada_semanal
+    const currentJornadas = await tx.$queryRaw<Array<{ id: string; dia_semana: string }>>`
+      SELECT id::text AS id, dia_semana::text AS dia_semana
+      FROM public.staff_jornada_semanal
       WHERE staff_id = ${staffId}::uuid
     `;
 
+    const submittedDays = new Set(jornadas.map((jornada) => jornada.diaSemana));
+
     for (const jornada of jornadas) {
+      const updated = await tx.$queryRaw<Array<{ id: string }>>`
+        UPDATE public.staff_jornada_semanal
+        SET
+          hora_entrada = ${jornada.horaEntrada}::time,
+          hora_salida = ${jornada.horaSalida}::time,
+          total_horas_dia = ${jornada.totalHorasDia}
+        WHERE staff_id = ${staffId}::uuid
+          AND dia_semana = ${jornada.diaSemana}::public.dia_semana_enum
+        RETURNING id::text AS id
+      `;
+
+      if (!updated[0]?.id) {
+        await tx.$executeRaw`
+          INSERT INTO public.staff_jornada_semanal (
+            staff_id,
+            dia_semana,
+            hora_entrada,
+            hora_salida,
+            total_horas_dia
+          )
+          VALUES (
+            ${staffId}::uuid,
+            ${jornada.diaSemana}::public.dia_semana_enum,
+            ${jornada.horaEntrada}::time,
+            ${jornada.horaSalida}::time,
+            ${jornada.totalHorasDia}
+          )
+        `;
+      }
+    }
+
+    // Preserve jornadas referenced by attendance history. Only remove obsolete
+    // rows that have never been used by an attendance record.
+    for (const jornada of currentJornadas) {
+      if (submittedDays.has(jornada.dia_semana)) continue;
+
+      const attendance = await tx.$queryRaw<Array<{ id: string }>>`
+        SELECT id::text AS id
+        FROM public.staff_registros_asistencia
+        WHERE jornada_id = ${jornada.id}::uuid
+        LIMIT 1
+      `;
+
+      if (attendance[0]?.id) continue;
+
       await tx.$executeRaw`
-        INSERT INTO public.staff_jornada_semanal (
-          staff_id,
-          dia_semana,
-          hora_entrada,
-          hora_salida,
-          total_horas_dia
-        )
-        VALUES (
-          ${staffId}::uuid,
-          ${jornada.diaSemana}::public.dia_semana_enum,
-          ${jornada.horaEntrada}::time,
-          ${jornada.horaSalida}::time,
-          ${jornada.totalHorasDia}
-        )
+        DELETE FROM public.staff_jornada_semanal
+        WHERE id = ${jornada.id}::uuid
       `;
     }
 
     return { staffId };
-  }, { timeout: 20000, maxWait: 10000 });
+  }, { timeout: 30000, maxWait: 30000 });
 };
 
 export const listStaffPausasProgramadas = async (staffId: string) => {
