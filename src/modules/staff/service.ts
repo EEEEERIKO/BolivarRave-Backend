@@ -151,7 +151,7 @@ type StaffRefreshTokenRow = {
   revoked_at: string | null;
 };
 
-const REFRESH_TOKEN_TTL_DAYS = Math.max(7, Number.parseInt(process.env.AUTH_REFRESH_TOKEN_TTL_DAYS ?? "120", 10) || 120);
+const REFRESH_TOKEN_TTL_DAYS = Math.max(7, Number.parseInt(process.env.AUTH_REFRESH_TOKEN_TTL_DAYS ?? "3650", 10) || 3650);
 
 export class StaffAuthError extends Error {
   readonly status: number;
@@ -1323,7 +1323,6 @@ export const replaceStaffJornadaSemanal = async (staffId: string, jornadas: Staf
   await ensureStaffHorarioLaboralSchemaReady();
 
   return prisma.$transaction(async (tx) => {
-
     const existing = await tx.$queryRaw<Array<{ id: string }>>`
       SELECT id::text AS id
       FROM public.staff
@@ -1335,32 +1334,68 @@ export const replaceStaffJornadaSemanal = async (staffId: string, jornadas: Staf
       throw new Error("No se encontro el staff solicitado");
     }
 
-    await tx.$executeRaw`
-      DELETE FROM public.staff_jornada_semanal
+    const currentJornadas = await tx.$queryRaw<Array<{ id: string; dia_semana: string }>>`
+      SELECT id::text AS id, dia_semana::text AS dia_semana
+      FROM public.staff_jornada_semanal
       WHERE staff_id = ${staffId}::uuid
     `;
 
+    const submittedDays = new Set(jornadas.map((jornada) => jornada.diaSemana));
+
     for (const jornada of jornadas) {
+      const updated = await tx.$queryRaw<Array<{ id: string }>>`
+        UPDATE public.staff_jornada_semanal
+        SET
+          hora_entrada = ${jornada.horaEntrada}::time,
+          hora_salida = ${jornada.horaSalida}::time,
+          total_horas_dia = ${jornada.totalHorasDia}
+        WHERE staff_id = ${staffId}::uuid
+          AND dia_semana = ${jornada.diaSemana}::public.dia_semana_enum
+        RETURNING id::text AS id
+      `;
+
+      if (!updated[0]?.id) {
+        await tx.$executeRaw`
+          INSERT INTO public.staff_jornada_semanal (
+            staff_id,
+            dia_semana,
+            hora_entrada,
+            hora_salida,
+            total_horas_dia
+          )
+          VALUES (
+            ${staffId}::uuid,
+            ${jornada.diaSemana}::public.dia_semana_enum,
+            ${jornada.horaEntrada}::time,
+            ${jornada.horaSalida}::time,
+            ${jornada.totalHorasDia}
+          )
+        `;
+      }
+    }
+
+    // Preserve jornadas referenced by attendance history. Only remove obsolete
+    // rows that have never been used by an attendance record.
+    for (const jornada of currentJornadas) {
+      if (submittedDays.has(jornada.dia_semana)) continue;
+
+      const attendance = await tx.$queryRaw<Array<{ id: string }>>`
+        SELECT id::text AS id
+        FROM public.staff_registros_asistencia
+        WHERE jornada_id = ${jornada.id}::uuid
+        LIMIT 1
+      `;
+
+      if (attendance[0]?.id) continue;
+
       await tx.$executeRaw`
-        INSERT INTO public.staff_jornada_semanal (
-          staff_id,
-          dia_semana,
-          hora_entrada,
-          hora_salida,
-          total_horas_dia
-        )
-        VALUES (
-          ${staffId}::uuid,
-          ${jornada.diaSemana}::public.dia_semana_enum,
-          ${jornada.horaEntrada}::time,
-          ${jornada.horaSalida}::time,
-          ${jornada.totalHorasDia}
-        )
+        DELETE FROM public.staff_jornada_semanal
+        WHERE id = ${jornada.id}::uuid
       `;
     }
 
     return { staffId };
-  }, { timeout: 20000, maxWait: 10000 });
+  }, { timeout: 30000, maxWait: 30000 });
 };
 
 export const listStaffPausasProgramadas = async (staffId: string) => {
@@ -1595,6 +1630,79 @@ export const listStaffBalanceMovimientos = async (staffId: string, limit = 50) =
     motivo: row.motivo,
     creadoPorStaffId: row.creado_por_staff_id,
     createdAt: row.created_at,
+  }));
+};
+
+export type StaffRecentActivity = {
+  id: string;
+  tipo: "entrada" | "salida" | "limpieza";
+  titulo: string;
+  detalle: string;
+  fecha: string;
+};
+
+export const listStaffRecentActivities = async (staffId: string): Promise<StaffRecentActivity[]> => {
+  await ensureStaffSecuritySchemaReady();
+
+  const rows = await prisma.$queryRaw<Array<{
+    id: string;
+    tipo: "entrada" | "salida" | "limpieza";
+    titulo: string;
+    detalle: string;
+    momento: string;
+  }>>`
+    SELECT activity.id, activity.tipo, activity.titulo, activity.detalle, activity.momento
+    FROM (
+      SELECT
+        CONCAT(r.id::text, '-entrada') AS id,
+        'entrada'::text AS tipo,
+        'Entrada registrada'::text AS titulo,
+        CASE
+          WHEN r.minutos_tarde > 0 THEN CONCAT('Llegó tarde por ', r.minutos_tarde::text, ' minuto(s).')
+          ELSE 'Entrada registrada a tiempo.'
+        END AS detalle,
+        r.hora_entrada AS momento
+      FROM public.staff_registros_asistencia r
+      WHERE r.staff_id = ${staffId}::uuid
+        AND r.hora_entrada IS NOT NULL
+
+      UNION ALL
+
+      SELECT
+        CONCAT(r.id::text, '-salida') AS id,
+        'salida'::text AS tipo,
+        'Salida registrada'::text AS titulo,
+        CASE
+          WHEN r.minutos_salida_anticipada > 0 THEN CONCAT('Salió ', r.minutos_salida_anticipada::text, ' minuto(s) antes de la jornada.')
+          ELSE 'Salida registrada correctamente.'
+        END AS detalle,
+        r.hora_salida AS momento
+      FROM public.staff_registros_asistencia r
+      WHERE r.staff_id = ${staffId}::uuid
+        AND r.hora_salida IS NOT NULL
+
+      UNION ALL
+
+      SELECT
+        CONCAT(h.id::text, '-limpieza') AS id,
+        'limpieza'::text AS tipo,
+        CONCAT(h.room_name, ' marcado como limpio') AS titulo,
+        CONCAT('Registro de limpieza realizado por ', COALESCE(NULLIF(h.created_by_name, ''), 'personal autorizado'), '.') AS detalle,
+        h.created_at AS momento
+      FROM public.schedule_room_action_history h
+      WHERE h.created_by_staff_id = ${staffId}::uuid
+        AND h.action_type = 'salon_limpio'
+    ) AS activity
+    ORDER BY activity.momento DESC
+    LIMIT 5
+  `;
+
+  return rows.map((row) => ({
+    id: row.id,
+    tipo: row.tipo,
+    titulo: row.titulo,
+    detalle: row.detalle,
+    fecha: row.momento,
   }));
 };
 

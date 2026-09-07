@@ -1,5 +1,5 @@
 import { prisma } from "../../lib/prisma";
-import { getStaffByCedula, getStaffHorarioLaboral, listStaff, listStaffJornadaSemanal } from "../staff/service";
+import { getStaffByCedula, getStaffHorarioLaboral, listStaffJornadaSemanal } from "../staff/service";
 
 const COLOMBIA_TIMEZONE = "America/Bogota";
 
@@ -38,6 +38,35 @@ type ActiveStaffRawRow = {
   apellidos: string;
   rol: string;
   hora_entrada: string;
+};
+
+type ExpectedStaffRawRow = {
+  id: string;
+  staff_id: string;
+  cedula: string;
+  nombres: string;
+  apellidos: string;
+  rol: string | null;
+  hora_entrada: string;
+  hora_salida: string;
+  estado_registro: boolean;
+};
+
+export type AttendanceReportRow = {
+  staffId: string;
+  nombreCompleto: string;
+  cedula: string;
+  rol: string;
+  fecha: string;
+  diaSemana: string;
+  horaEntradaProgramada: string;
+  horaSalidaProgramada: string;
+  minutosJornada: number;
+  horaEntrada: string | null;
+  horaSalida: string | null;
+  minutosTarde: number;
+  minutosSalidaAnticipada: number;
+  minutosBalance: number;
 };
 
 type StaffLiveScheduleItem = {
@@ -119,6 +148,7 @@ export type ActiveStaffEntry = {
 export type ExpectedStaffEntry = {
   id: string;
   staffId: string;
+  cedula: string;
   nombreCompleto: string;
   rol: string;
   horaEntrada: string;
@@ -754,40 +784,56 @@ export const getAttendanceDashboard = async (): Promise<AttendanceDashboard> => 
   await ensureAttendanceSchemaReady();
 
   const today = getBogotaNow();
-  const staffList = await listStaff();
-
-  const currentWorkingCandidates = await Promise.all(
-    staffList
-      .filter((staff) => staff.estado === "Active")
-      .map(async (staff) => {
-        const horario = await getStaffHorarioLaboral(staff.id);
-        const jornadasDelDia = horario.jornadaSemanal.filter((jornada) => normalizeText(jornada.diaSemana) === normalizeText(today.weekday));
-        const jornadaActiva = findActiveJornada(jornadasDelDia, today.minutes);
-
-        if (!jornadaActiva) {
-          return null;
-        }
-
-        if (isInActivePause(horario.pausasProgramadas, today.minutes, today.weekday)) {
-          return null;
-        }
-
-        const recordsToday = await getCurrentAttendanceEntry(staff.id, today.dateKey);
-        const registroAbierto = recordsToday.find((registro) => registro.horaEntrada && !registro.horaSalida) ?? null;
-
-        return {
-          id: staff.id,
-          staffId: staff.id,
-          nombreCompleto: `${staff.nombres} ${staff.apellidos}`.trim(),
-          rol: staff.rol,
-          horaEntrada: jornadaActiva.horaEntrada,
-          horaSalida: jornadaActiva.horaSalida,
-          estadoRegistro: registroAbierto ? ("registrado" as const) : ("no registrado" as const),
-        };
-      })
+  const currentWorkingRows = await runAttendanceQueryWithRecovery(() =>
+    prisma.$queryRaw<ExpectedStaffRawRow[]>`
+      SELECT
+        j.id::text AS id,
+        s.id::text AS staff_id,
+        s.cedula,
+        s.nombres,
+        s.apellidos,
+        sr.nombre AS rol,
+        TO_CHAR(j.hora_entrada, 'HH24:MI') AS hora_entrada,
+        TO_CHAR(j.hora_salida, 'HH24:MI') AS hora_salida,
+        EXISTS (
+          SELECT 1
+          FROM public.staff_registros_asistencia r
+          WHERE r.staff_id = s.id
+            AND r.jornada_id = j.id
+            AND r.fecha = ${today.dateKey}::date
+            AND r.hora_entrada IS NOT NULL
+            AND r.hora_salida IS NULL
+        ) AS estado_registro
+      FROM public.staff s
+      INNER JOIN public.staff_jornada_semanal j ON j.staff_id = s.id
+      LEFT JOIN public.staff_roles sr ON sr.id = s.role_id
+      WHERE s.estado = 'Active'
+        AND j.dia_semana::text = ${today.weekday}
+        AND j.hora_entrada <= ${today.timeKey}::time
+        AND j.hora_salida > ${today.timeKey}::time
+        AND NOT EXISTS (
+          SELECT 1
+          FROM public.staff_pausas_programadas p
+          WHERE p.staff_id = s.id
+            AND p.dia_semana::text = ${today.weekday}
+            AND p.hora_inicio <= ${today.timeKey}::time
+            AND p.hora_fin > ${today.timeKey}::time
+        )
+      ORDER BY j.hora_entrada ASC, s.apellidos ASC, s.nombres ASC
+    `,
   );
 
-  const usuariosActivosAhora = currentWorkingCandidates.filter((entry): entry is ExpectedStaffEntry => entry !== null);
+  const usuariosActivosAhora: ExpectedStaffEntry[] = currentWorkingRows.map((row) => ({
+    id: row.id,
+    staffId: row.staff_id,
+    cedula: row.cedula,
+    nombreCompleto: `${row.nombres} ${row.apellidos}`.trim(),
+    rol: row.rol || "Colaborador",
+    horaEntrada: row.hora_entrada,
+    horaSalida: row.hora_salida,
+    estadoRegistro: row.estado_registro ? "registrado" : "no registrado",
+  }));
+
   const usuariosRegistradosAhora = usuariosActivosAhora.filter((entry) => entry.estadoRegistro === "registrado");
   const usuariosNoRegistradosAhora = usuariosActivosAhora.filter((entry) => entry.estadoRegistro === "no registrado");
 
@@ -819,6 +865,7 @@ export const getAttendanceDashboard = async (): Promise<AttendanceDashboard> => 
         FROM public.staff_registros_asistencia r
         INNER JOIN public.staff s ON s.id = r.staff_id
         WHERE r.hora_entrada IS NOT NULL
+          AND r.fecha = ${today.dateKey}::date
 
         UNION ALL
 
@@ -838,6 +885,7 @@ export const getAttendanceDashboard = async (): Promise<AttendanceDashboard> => 
         FROM public.staff_registros_asistencia r
         INNER JOIN public.staff s ON s.id = r.staff_id
         WHERE r.hora_salida IS NOT NULL
+          AND r.fecha = ${today.dateKey}::date
       ) AS movement
       ORDER BY movement.momento DESC
       LIMIT 30
@@ -890,4 +938,91 @@ export const getAttendanceDashboard = async (): Promise<AttendanceDashboard> => 
     totalRegistradosAhora: usuariosRegistradosAhora.length,
     totalNoRegistradosAhora: usuariosNoRegistradosAhora.length,
   };
+};
+
+export const getAttendanceReport = async (fromDate: string, toDate: string): Promise<AttendanceReportRow[]> => {
+  await ensureAttendanceSchemaReady();
+
+  const rows = await runAttendanceQueryWithRecovery(() =>
+    prisma.$queryRaw<Array<{
+      staff_id: string;
+      nombres: string;
+      apellidos: string;
+      cedula: string;
+      rol: string | null;
+      fecha: string;
+      dia_semana: string;
+      hora_entrada_programada: string;
+      hora_salida_programada: string;
+      minutos_jornada: number;
+      hora_entrada: string | null;
+      hora_salida: string | null;
+      minutos_tarde: number;
+      minutos_salida_anticipada: number;
+      minutos_balance: number;
+    }>>`
+      WITH dias AS (
+        SELECT generate_series(${fromDate}::date, ${toDate}::date, interval '1 day')::date AS fecha
+      )
+      SELECT
+        s.id::text AS staff_id,
+        s.nombres,
+        s.apellidos,
+        s.cedula,
+        sr.nombre AS rol,
+        TO_CHAR(d.fecha, 'YYYY-MM-DD') AS fecha,
+        CASE EXTRACT(ISODOW FROM d.fecha)
+          WHEN 1 THEN 'Lunes'
+          WHEN 2 THEN 'Martes'
+          WHEN 3 THEN 'Miercoles'
+          WHEN 4 THEN 'Jueves'
+          WHEN 5 THEN 'Viernes'
+          WHEN 6 THEN 'Sabado'
+          WHEN 7 THEN 'Domingo'
+        END AS dia_semana,
+        TO_CHAR(j.hora_entrada, 'HH24:MI') AS hora_entrada_programada,
+        TO_CHAR(j.hora_salida, 'HH24:MI') AS hora_salida_programada,
+        ROUND(EXTRACT(EPOCH FROM (j.hora_salida - j.hora_entrada)) / 60)::integer AS minutos_jornada,
+        TO_CHAR(r.hora_entrada AT TIME ZONE ${COLOMBIA_TIMEZONE}, 'HH24:MI') AS hora_entrada,
+        TO_CHAR(r.hora_salida AT TIME ZONE ${COLOMBIA_TIMEZONE}, 'HH24:MI') AS hora_salida,
+        COALESCE(r.minutos_tarde, 0)::integer AS minutos_tarde,
+        COALESCE(r.minutos_salida_anticipada, 0)::integer AS minutos_salida_anticipada,
+        COALESCE(r.minutos_balance, 0)::integer AS minutos_balance
+      FROM dias d
+      INNER JOIN public.staff_jornada_semanal j
+        ON j.dia_semana::text = CASE EXTRACT(ISODOW FROM d.fecha)
+          WHEN 1 THEN 'Lunes'
+          WHEN 2 THEN 'Martes'
+          WHEN 3 THEN 'Miercoles'
+          WHEN 4 THEN 'Jueves'
+          WHEN 5 THEN 'Viernes'
+          WHEN 6 THEN 'Sabado'
+          WHEN 7 THEN 'Domingo'
+        END
+      INNER JOIN public.staff s ON s.id = j.staff_id
+      LEFT JOIN public.staff_roles sr ON sr.id = s.role_id
+      LEFT JOIN public.staff_registros_asistencia r
+        ON r.staff_id = j.staff_id
+        AND r.jornada_id = j.id
+        AND r.fecha = d.fecha
+      ORDER BY d.fecha ASC, s.apellidos ASC, s.nombres ASC, j.hora_entrada ASC
+    `,
+  );
+
+  return rows.map((row) => ({
+    staffId: row.staff_id,
+    nombreCompleto: `${row.nombres} ${row.apellidos}`.trim(),
+    cedula: row.cedula,
+    rol: row.rol || "Colaborador",
+    fecha: row.fecha,
+    diaSemana: row.dia_semana,
+    horaEntradaProgramada: row.hora_entrada_programada,
+    horaSalidaProgramada: row.hora_salida_programada,
+    minutosJornada: Number(row.minutos_jornada) || 0,
+    horaEntrada: row.hora_entrada,
+    horaSalida: row.hora_salida,
+    minutosTarde: Number(row.minutos_tarde) || 0,
+    minutosSalidaAnticipada: Number(row.minutos_salida_anticipada) || 0,
+    minutosBalance: Number(row.minutos_balance) || 0,
+  }));
 };
