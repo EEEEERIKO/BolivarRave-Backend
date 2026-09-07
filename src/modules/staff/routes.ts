@@ -17,6 +17,7 @@ import {
   getStaffById,
   getStaffByCedula,
   listStaffBalanceMovimientos,
+  listStaffRecentActivities,
   listStaffSkills,
   listAllStaffJornadasSemanales,
   listAllStaffPausasProgramadas,
@@ -666,6 +667,27 @@ staffRouter.get("/:id", async (req, res, next) => {
     }
 
     return res.json({ staff });
+  } catch (error) {
+    if (error instanceof z.ZodError) {
+      return res.status(400).json({
+        error: `Parametros invalidos: ${error.issues[0]?.message ?? "error de validacion"}`,
+      });
+    }
+
+    return next(error);
+  }
+});
+
+staffRouter.get("/:id/actividades-recientes", async (req, res, next) => {
+  try {
+    const { id } = idParamsSchema.parse(req.params);
+
+    if (!ensureCollaboradorSelfAccess(req, res, id)) {
+      return;
+    }
+
+    const actividades = await listStaffRecentActivities(id);
+    return res.json({ actividades });
   } catch (error) {
     if (error instanceof z.ZodError) {
       return res.status(400).json({

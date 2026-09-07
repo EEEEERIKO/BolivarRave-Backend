@@ -1633,6 +1633,79 @@ export const listStaffBalanceMovimientos = async (staffId: string, limit = 50) =
   }));
 };
 
+export type StaffRecentActivity = {
+  id: string;
+  tipo: "entrada" | "salida" | "limpieza";
+  titulo: string;
+  detalle: string;
+  fecha: string;
+};
+
+export const listStaffRecentActivities = async (staffId: string): Promise<StaffRecentActivity[]> => {
+  await ensureStaffSecuritySchemaReady();
+
+  const rows = await prisma.$queryRaw<Array<{
+    id: string;
+    tipo: "entrada" | "salida" | "limpieza";
+    titulo: string;
+    detalle: string;
+    momento: string;
+  }>>`
+    SELECT activity.id, activity.tipo, activity.titulo, activity.detalle, activity.momento
+    FROM (
+      SELECT
+        CONCAT(r.id::text, '-entrada') AS id,
+        'entrada'::text AS tipo,
+        'Entrada registrada'::text AS titulo,
+        CASE
+          WHEN r.minutos_tarde > 0 THEN CONCAT('Llegó tarde por ', r.minutos_tarde::text, ' minuto(s).')
+          ELSE 'Entrada registrada a tiempo.'
+        END AS detalle,
+        r.hora_entrada AS momento
+      FROM public.staff_registros_asistencia r
+      WHERE r.staff_id = ${staffId}::uuid
+        AND r.hora_entrada IS NOT NULL
+
+      UNION ALL
+
+      SELECT
+        CONCAT(r.id::text, '-salida') AS id,
+        'salida'::text AS tipo,
+        'Salida registrada'::text AS titulo,
+        CASE
+          WHEN r.minutos_salida_anticipada > 0 THEN CONCAT('Salió ', r.minutos_salida_anticipada::text, ' minuto(s) antes de la jornada.')
+          ELSE 'Salida registrada correctamente.'
+        END AS detalle,
+        r.hora_salida AS momento
+      FROM public.staff_registros_asistencia r
+      WHERE r.staff_id = ${staffId}::uuid
+        AND r.hora_salida IS NOT NULL
+
+      UNION ALL
+
+      SELECT
+        CONCAT(h.id::text, '-limpieza') AS id,
+        'limpieza'::text AS tipo,
+        CONCAT(h.room_name, ' marcado como limpio') AS titulo,
+        CONCAT('Registro de limpieza realizado por ', COALESCE(NULLIF(h.created_by_name, ''), 'personal autorizado'), '.') AS detalle,
+        h.created_at AS momento
+      FROM public.schedule_room_action_history h
+      WHERE h.created_by_staff_id = ${staffId}::uuid
+        AND h.action_type = 'salon_limpio'
+    ) AS activity
+    ORDER BY activity.momento DESC
+    LIMIT 5
+  `;
+
+  return rows.map((row) => ({
+    id: row.id,
+    tipo: row.tipo,
+    titulo: row.titulo,
+    detalle: row.detalle,
+    fecha: row.momento,
+  }));
+};
+
 export const createStaffBalanceMovimiento = async (staffId: string, payload: StaffBalanceMovimientoInput) => {
   await ensureStaffHorarioLaboralSchemaReady();
 
