@@ -18,7 +18,7 @@ const JWT_SECRET = AUTH_JWT_SECRET || (!isProduction ? FALLBACK_DEV_SECRET : "")
 const JWT_ISSUER = "unac-bolivar-horarios";
 const JWT_AUDIENCE = "unac-frontend";
 export const ACCESS_TOKEN_EXPIRES_IN =
-  (process.env.AUTH_ACCESS_TOKEN_EXPIRES_IN?.trim() || "1h") as NonNullable<jwt.SignOptions["expiresIn"]>;
+  (process.env.AUTH_ACCESS_TOKEN_EXPIRES_IN?.trim() || "15m") as NonNullable<jwt.SignOptions["expiresIn"]>;
 
 if (isProduction && !AUTH_JWT_SECRET) {
   throw new Error("AUTH_JWT_SECRET es obligatoria en produccion");

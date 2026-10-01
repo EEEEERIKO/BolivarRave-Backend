@@ -1,5 +1,4 @@
 import { prisma } from "../../lib/prisma";
-import { sendReservationConfirmationEmail, ReservationEmailData } from "./email";
 import { randomBytes } from "crypto";
 
 export type ReservationResourceType = "rooms" | "equipment" | "televisor";
@@ -552,6 +551,9 @@ const updateInventoryItemRoom = async (db: any, itemId: string, room: string) =>
 
 export type CreateReservationResult = {
   id: string;
+  confirmationToken: string;
+  resourceLabel: string;
+  destinationRoomLabel: string | null;
   assignmentLabel: string | null;
   returnNote: string | null;
 };
@@ -623,28 +625,14 @@ export const createReservationRequest = async (payload: CreateReservationInput):
       throw new Error("No se pudo crear la solicitud de reserva");
     }
 
-    // Send confirmation email if email is provided
-    if (payload.requesterEmail) {
-      const emailData: ReservationEmailData = {
-        id,
-        requesterName: payload.requesterName,
-        requesterEmail: payload.requesterEmail,
-        resourceLabel: room.nombre,
-        resourceType: "rooms",
-        bookingDate: toIsoDate(payload.bookingDate),
-        startTime: payload.startTime,
-        endTime: payload.endTime,
-        purpose: payload.purpose,
-        confirmationToken,
-      };
-
-      // Send email asynchronously without blocking the response
-      sendReservationConfirmationEmail(emailData).catch((error) => {
-        console.error(`Failed to send email for reservation ${id}:`, error);
-      });
-    }
-
-    return { id, assignmentLabel: null, returnNote: null };
+    return {
+      id,
+      confirmationToken,
+      resourceLabel: room.nombre,
+      destinationRoomLabel: null,
+      assignmentLabel: null,
+      returnNote: null,
+    };
   }
 
   // Equipment / televisor reservation
@@ -762,31 +750,11 @@ export const createReservationRequest = async (payload: CreateReservationInput):
       throw new Error("No se pudo crear la solicitud de reserva");
     }
 
-    // Send confirmation email if email is provided
-    if (payload.requesterEmail) {
-      const emailData: ReservationEmailData = {
-        id,
-        requesterName: payload.requesterName,
-        requesterEmail: payload.requesterEmail,
-        resourceLabel: reservationResourceLabel,
-        resourceType: payload.resourceType,
-        bookingDate: toIsoDate(payload.bookingDate),
-        startTime: payload.startTime,
-        endTime: payload.endTime,
-        purpose: payload.purpose,
-        confirmationToken,
-        returnNote: payload.resourceType === "televisor" ? televisionAssignmentNote : null,
-        ...(destinationRoomLabel ? { destinationRoom: destinationRoomLabel } : {}),
-      };
-
-      // Send email asynchronously without blocking the response
-      sendReservationConfirmationEmail(emailData).catch((error) => {
-        console.error(`Failed to send email for reservation ${id}:`, error);
-      });
-    }
-
     return {
       id,
+      confirmationToken,
+      resourceLabel: reservationResourceLabel,
+      destinationRoomLabel,
       assignmentLabel: payload.resourceType === "televisor" ? reservationResourceLabel : null,
       returnNote: payload.resourceType === "televisor" ? televisionAssignmentNote : null,
     };

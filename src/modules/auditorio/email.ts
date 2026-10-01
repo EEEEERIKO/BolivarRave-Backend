@@ -23,7 +23,6 @@ export type AuditorioReservaEmailData = {
 type EmailKind = "registered" | "confirmed" | "rejected";
 
 const resend = getResendClient();
-const resendApiKey = process.env.RESEND_API_KEY;
 
 const escapeHtml = (value: string) =>
   value
@@ -313,7 +312,10 @@ const buildMessage = (kind: EmailKind, data: AuditorioReservaEmailData) => {
 };
 
 const sendAuditorioEmail = async (kind: EmailKind, data: AuditorioReservaEmailData): Promise<{ success: boolean; error?: string }> => {
-  if (!resend || !resendApiKey) {
+  // Resolve the client at send time so dotenv-loaded configuration is used
+  // even when this module was imported before the environment was initialized.
+  const client = resend ?? getResendClient();
+  if (!client || !process.env.RESEND_API_KEY) {
     console.warn(`[auditorio] RESEND_API_KEY no configurada; correo omitido (${kind}) para reserva ${data.reservaId}`);
     return { success: false, error: "RESEND_API_KEY no configurada" };
   }
@@ -325,20 +327,31 @@ const sendAuditorioEmail = async (kind: EmailKind, data: AuditorioReservaEmailDa
 
   try {
     const message = buildMessage(kind, data);
-    const response = await resend.emails.send({
-      from: process.env.AUDITORIO_RESEND_FROM ?? "bolivar-rave-reservas@unac.edu.co",
-      to: data.requesterEmail,
-      subject: message.subject,
-      html: message.html,
-    });
+    let lastError = "Error desconocido de Resend";
 
-    if (response.error) {
-      console.error(`[auditorio] error enviando correo ${kind} para ${data.reservaId}:`, response.error);
-      return { success: false, error: response.error.message };
+    // A transient provider/network failure should not silently lose the
+    // important registration notification. Retry once before reporting it.
+    for (let attempt = 1; attempt <= 2; attempt += 1) {
+      const response = await client.emails.send({
+        from: process.env.AUDITORIO_RESEND_FROM ?? "bolivar-rave-reservas@unac.edu.co",
+        to: data.requesterEmail,
+        subject: message.subject,
+        html: message.html,
+      });
+
+      if (!response.error) {
+        console.log(`[auditorio] correo ${kind} enviado para ${data.reservaId} a ${data.requesterEmail} (id: ${response.data?.id ?? "sin-id"})`);
+        return { success: true };
+      }
+
+      lastError = response.error.message;
+      console.error(`[auditorio] intento ${attempt}/2 fallido para correo ${kind} de ${data.reservaId}:`, response.error);
+      if (attempt < 2) {
+        await new Promise((resolve) => setTimeout(resolve, 500));
+      }
     }
 
-    console.log(`[auditorio] correo ${kind} enviado para ${data.reservaId} a ${data.requesterEmail}`);
-    return { success: true };
+    return { success: false, error: lastError };
   } catch (error) {
     console.error(`[auditorio] error enviando correo ${kind} para ${data.reservaId}:`, error);
     return { success: false, error: error instanceof Error ? error.message : "Unknown error" };

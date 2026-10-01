@@ -593,14 +593,14 @@ staffRouter.post("/dev/create-monitor", async (req, res, next) => {
 
     const exists = await getStaffByCedula("Monitor").catch(() => null);
     if (exists) {
-      if (exists.roleId === 2 && exists.rol?.toLowerCase() === "monitor") {
+      if (exists.roleId === 4 && exists.rol?.toLowerCase() === "monitor") {
         return res.json({ message: "Monitor user already exists", staffId: exists.id });
       }
 
       const updated = await updateStaff({
         id: exists.id,
         numeroStaff: exists.numeroStaff,
-        roleId: 2,
+        roleId: 4,
         rol: "Monitor",
         nombres: exists.nombres,
         apellidos: exists.apellidos,
@@ -627,7 +627,7 @@ staffRouter.post("/dev/create-monitor", async (req, res, next) => {
     }
 
     const created = await createStaff({
-      roleId: 2,
+      roleId: 4,
       rol: "Monitor",
       nombres: "Monitor",
       apellidos: "",
