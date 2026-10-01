@@ -16,6 +16,7 @@ import {
   listReservationRequestsByCreator,
 } from "./service";
 import { prisma } from "../../lib/prisma";
+import { sendReservationConfirmationEmail } from "./email";
 
 export const reservasRouter = Router();
 
@@ -200,6 +201,30 @@ reservasRouter.post("/", requireAuthToken, async (req, res, next) => {
       destinationRoomId: parsed.destinationRoomId ?? null,
       createdByStaffId: authUser.staffId,
     });
+
+    // Send the registration email only after the reservation transaction has
+    // completed, so the link cannot be delivered for a transaction that later
+    // rolls back. Email failure is logged but does not undo the reservation.
+    if (parsed.requesterEmail) {
+      const emailResult = await sendReservationConfirmationEmail({
+        id: created.id,
+        requesterName: parsed.requesterName,
+        requesterEmail: parsed.requesterEmail,
+        resourceLabel: created.resourceLabel,
+        resourceType: parsed.resourceType,
+        bookingDate: parsed.bookingDate,
+        startTime: parsed.startTime,
+        endTime: parsed.endTime,
+        purpose: parsed.purpose,
+        confirmationToken: created.confirmationToken,
+        returnNote: created.returnNote,
+        ...(created.destinationRoomLabel ? { destinationRoom: created.destinationRoomLabel } : {}),
+      });
+
+      if (!emailResult.success) {
+        console.error(`[Reservas] no se pudo enviar el correo de registro para ${created.id}: ${emailResult.error ?? "error desconocido"}`);
+      }
+    }
 
     return res.status(201).json({
       message: "Reserva registrada correctamente.",

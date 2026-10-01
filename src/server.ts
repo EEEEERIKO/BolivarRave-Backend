@@ -118,6 +118,12 @@ app.use("/api", (req, res, next) => {
     return next();
   }
 
+  // Endpoint auxiliar únicamente para desarrollo local. Se deja fuera del
+  // middleware global para poder crear el usuario inicial sin token.
+  if (!isProduction && req.method === "POST" && req.path === "/staff/dev/create-monitor") {
+    return next();
+  }
+
   // Public confirmation link from email: no authenticated session required.
   const isPublicReservationConfirmation = req.method === "GET" && /^\/reservas\/[^/]+\/confirm$/.test(req.path);
   if (isPublicReservationConfirmation) {

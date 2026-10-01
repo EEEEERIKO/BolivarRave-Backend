@@ -1,6 +1,4 @@
-import { Resend } from "resend";
-
-const resend = new Resend(process.env.RESEND_API_KEY);
+import { getResendClient } from "../../lib/resend";
 
 export interface ReservationEmailData {
   id: string;
@@ -38,6 +36,9 @@ const formatReservationType = (resourceType: string): string => {
 
 const buildEmailHtml = (data: ReservationEmailData): string => {
   const confirmUrl = getConfirmationUrl(data.id, data.confirmationToken);
+  // Escape the URL because it contains query-string ampersands and is placed
+  // directly into the HTML attribute and fallback text.
+  const escapedConfirmUrl = escapeHtml(confirmUrl);
   const resourceType = formatReservationType(data.resourceType);
   const resourceLabel = escapeHtml(data.resourceLabel);
   const requesterName = escapeHtml(data.requesterName);
@@ -365,12 +366,19 @@ const buildEmailHtml = (data: ReservationEmailData): string => {
         </div>
 
         <div style="text-align: center;">
-          <a href="${confirmUrl}" class="action-button">Aceptar Términos y Confirmar Reserva</a>
+          <!-- A table wrapper plus inline styles keeps the CTA button visible in Gmail, Outlook and webmail clients. -->
+          <table role="presentation" border="0" cellpadding="0" cellspacing="0" align="center" style="margin: 28px auto;">
+            <tr>
+              <td align="center" bgcolor="#1a3a52" style="border-radius: 6px; background-color: #1a3a52;">
+                <a href="${escapedConfirmUrl}" class="action-button" style="display: inline-block; background-color: #1a3a52; border: 1px solid #1a3a52; border-radius: 6px; color: #ffffff !important; font-family: Arial, Helvetica, sans-serif; font-size: 14px; font-weight: 600; line-height: 20px; padding: 12px 32px; text-align: center; text-decoration: none;">Aceptar Términos y Confirmar Reserva</a>
+              </td>
+            </tr>
+          </table>
         </div>
 
         <div class="fallback-link">
           <p>Si el botón anterior no responde, copie y pegue este enlace en su navegador:</p>
-          <code>${confirmUrl}</code>
+          <code>${escapedConfirmUrl}</code>
         </div>
 
         <p style="font-size: 12px; color: #6b7280; margin-top: 16px;">
@@ -408,6 +416,12 @@ export const sendReservationConfirmationEmail = async (data: ReservationEmailDat
     if (!data.requesterEmail) {
       console.warn(`No email provided for reservation ${data.id}`);
       return { success: false, error: "No email provided" };
+    }
+
+    const resend = getResendClient();
+    if (!resend || !process.env.RESEND_API_KEY) {
+      console.error(`[Reservas] RESEND_API_KEY no configurada para ${data.id}`);
+      return { success: false, error: "RESEND_API_KEY no configurada" };
     }
 
     const html = buildEmailHtml(data);

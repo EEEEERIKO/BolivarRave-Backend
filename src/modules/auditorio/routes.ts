@@ -14,6 +14,11 @@ import {
   updateReservaAuditorio,
   type AuditorioEstado,
 } from "./service";
+import {
+  sendAuditorioReservaConfirmadaEmail,
+  sendAuditorioReservaRechazadaEmail,
+  sendAuditorioSolicitudRegistradaEmail,
+} from "./email";
 
 export const auditorioRouter = Router();
 
@@ -214,6 +219,50 @@ const toPublicReserva = (reserva: Awaited<ReturnType<typeof listReservasAuditori
   })),
 });
 
+type AuditorioReservaForEmail = Awaited<ReturnType<typeof listReservasAuditorio>>[number];
+
+const toAuditorioResources = (reserva: Pick<AuditorioReservaForEmail, "requierePantalla" | "requiereSonido" | "requiereMonitor" | "requiereProyector" | "requiereFiltroAgua">) => [
+  reserva.requierePantalla ? "Pantalla" : null,
+  reserva.requiereSonido ? "Sonido" : null,
+  reserva.requiereMonitor ? "Monitor" : null,
+  reserva.requiereProyector ? "Proyector" : null,
+  reserva.requiereFiltroAgua ? "Filtro de agua" : null,
+].filter((resource): resource is string => Boolean(resource));
+
+const toAuditorioEmailData = (reserva: AuditorioReservaForEmail) => ({
+  reservaId: reserva.id,
+  requesterName: reserva.solicitanteNombre?.trim() || reserva.organizador,
+  requesterEmail: reserva.organizador,
+  eventName: reserva.nombreEvento,
+  requesterPhone: reserva.solicitanteTelefono ?? null,
+  periodStart: reserva.fechaInicioPeriodo,
+  periodEnd: reserva.fechaFinPeriodo,
+  attendees: reserva.numeroAsistentes,
+  resources: toAuditorioResources(reserva),
+  notes: reserva.observaciones ?? null,
+  horarios: reserva.horarios.map((horario) => ({
+    fechaEspecifica: horario.fechaEspecifica,
+    horaInicio: horario.horaInicio,
+    horaFin: horario.horaFin,
+  })),
+});
+
+const sendAuditorioNotification = async (
+  kind: "registered" | "confirmed" | "rejected",
+  reserva: AuditorioReservaForEmail,
+) => {
+  const data = toAuditorioEmailData(reserva);
+  const result = kind === "registered"
+    ? await sendAuditorioSolicitudRegistradaEmail(data)
+    : kind === "confirmed"
+      ? await sendAuditorioReservaConfirmadaEmail(data)
+      : await sendAuditorioReservaRechazadaEmail(data);
+
+  if (!result.success) {
+    console.error(`[auditorio] no se pudo enviar el correo ${kind} para ${reserva.id}: ${result.error ?? "error desconocido"}`);
+  }
+};
+
 auditorioRouter.get("/reservas", async (_req, res, next) => {
   try {
     const reservas = await listReservasAuditorio();
@@ -317,6 +366,12 @@ auditorioRouter.post("/reservas", async (req, res, next) => {
 
 auditorioRouter.post("/public/reservas", async (req, res, next) => {
   try {
+    const rawEmail = typeof req.body?.correo === "string" ? req.body.correo.trim() : "";
+    console.log("[auditorio] POST /public/reservas recibido", {
+      eventName: typeof req.body?.nombreEvento === "string" ? req.body.nombreEvento : null,
+      emailDomain: rawEmail.includes("@") ? rawEmail.split("@").pop() : null,
+    });
+
     const parsed = publicReservaBodySchema.parse(req.body);
 
     if (parsed.correo.trim().toLowerCase() !== parsed.confirmarCorreo.trim().toLowerCase()) {
@@ -358,11 +413,48 @@ auditorioRouter.post("/public/reservas", async (req, res, next) => {
       console.error("Failed to create pending auditorio solicitud:", e);
     }
 
+    // The reservation is already persisted. A mail failure must not make the
+    // public request fail, but it must be logged for operational follow-up.
+    let registeredEmailSent = false;
+    try {
+      console.log(`[auditorio] iniciando correo registered para ${created.reservaId} a ${parsed.correo}`);
+      const registeredEmail = await sendAuditorioSolicitudRegistradaEmail({
+        reservaId: created.reservaId,
+        requesterName: parsed.solicitanteNombre,
+        requesterEmail: parsed.correo,
+        eventName: parsed.nombreEvento,
+        requesterPhone: parsed.solicitanteTelefono,
+        periodStart: parsed.fechaInicioPeriodo,
+        periodEnd: parsed.fechaFinPeriodo,
+        attendees: parsed.numeroAsistentes,
+        resources: [
+          parsed.requierePantalla ? "Pantalla" : null,
+          parsed.requiereSonido ? "Sonido" : null,
+          parsed.requiereMonitor ? "Monitor" : null,
+          parsed.requiereProyector ? "Proyector" : null,
+          parsed.requiereFiltroAgua ? "Filtro de agua" : null,
+        ].filter((resource): resource is string => Boolean(resource)),
+        notes: parsed.observaciones ?? null,
+        horarios: parsed.horarios.map((horario) => ({
+          fechaEspecifica: horario.fechaEspecifica,
+          horaInicio: horario.horaInicio,
+          horaFin: horario.horaFin,
+        })),
+      });
+      registeredEmailSent = registeredEmail.success;
+      if (!registeredEmail.success) {
+        console.error(`[auditorio] el correo de solicitud registrada no fue aceptado para ${created.reservaId}: ${registeredEmail.error ?? "error desconocido"}`);
+      }
+    } catch (emailError) {
+      console.error(`[auditorio] no se pudo preparar el correo de solicitud registrada para ${created.reservaId}:`, emailError);
+    }
+
     broadcastScheduleRefresh();
 
     return res.status(201).json({
       message: "Solicitud de reserva creada correctamente",
       reservaId: created.reservaId,
+      registeredEmailSent,
     });
   } catch (error) {
     if (error instanceof z.ZodError) {
@@ -383,6 +475,12 @@ auditorioRouter.put("/reservas/:id", requireAdminRole, async (req, res, next) =>
   try {
     const { id } = idParamsSchema.parse(req.params);
     const parsed = reservaBodySchema.parse(req.body);
+    let previousReserva: AuditorioReservaForEmail | undefined;
+    try {
+      previousReserva = (await listReservasAuditorio()).find((reserva) => reserva.id === id);
+    } catch (lookupError) {
+      console.error(`[auditorio] no se pudo consultar el estado anterior de ${id}:`, lookupError);
+    }
 
     validatePeriodConsistency(parsed.fechaInicioPeriodo, parsed.fechaFinPeriodo, parsed.horarios);
     validateHorariosNoOverlap(parsed.horarios);
@@ -409,6 +507,17 @@ auditorioRouter.put("/reservas/:id", requireAdminRole, async (req, res, next) =>
       })),
     });
 
+    if (previousReserva && previousReserva.estado !== parsed.estado && (parsed.estado === "Aprobada" || parsed.estado === "Cancelada")) {
+      try {
+        const updatedReserva = (await listReservasAuditorio()).find((reserva) => reserva.id === id);
+        if (updatedReserva) {
+          await sendAuditorioNotification(parsed.estado === "Aprobada" ? "confirmed" : "rejected", updatedReserva);
+        }
+      } catch (emailError) {
+        console.error(`[auditorio] no se pudo preparar el correo de cambio de estado para ${id}:`, emailError);
+      }
+    }
+
     broadcastScheduleRefresh();
 
     return res.json({
@@ -434,8 +543,25 @@ auditorioRouter.patch("/reservas/:id/estado", requireAdminRole, async (req, res,
   try {
     const { id } = idParamsSchema.parse(req.params);
     const { estado } = patchEstadoBodySchema.parse(req.body);
+    let previousReserva: AuditorioReservaForEmail | undefined;
+    try {
+      previousReserva = (await listReservasAuditorio()).find((reserva) => reserva.id === id);
+    } catch (lookupError) {
+      console.error(`[auditorio] no se pudo consultar el estado anterior de ${id}:`, lookupError);
+    }
 
     const updated = await updateEstadoReservaAuditorio(id, estado);
+
+    if (previousReserva && previousReserva.estado !== estado && (estado === "Aprobada" || estado === "Cancelada")) {
+      try {
+        const updatedReserva = (await listReservasAuditorio()).find((reserva) => reserva.id === id);
+        if (updatedReserva) {
+          await sendAuditorioNotification(estado === "Aprobada" ? "confirmed" : "rejected", updatedReserva);
+        }
+      } catch (emailError) {
+        console.error(`[auditorio] no se pudo preparar el correo de cambio de estado para ${id}:`, emailError);
+      }
+    }
 
     broadcastScheduleRefresh();
 
