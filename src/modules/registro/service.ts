@@ -750,6 +750,24 @@ export const registerAttendanceExitByCedula = async (cedula: string, creadoPorSt
   };
 };
 
+export const registerAttendanceAutomaticallyByCedula = async (cedula: string, creadoPorStaffId: string) => {
+  const preview = await getAttendancePreviewByCedula(cedula);
+
+  if (preview.registroAbierto) {
+    if (!preview.puedeRegistrarSalida) {
+      throw new AttendanceError(preview.mensaje, 400);
+    }
+
+    return registerAttendanceExitByCedula(cedula, creadoPorStaffId);
+  }
+
+  if (!preview.puedeRegistrarEntrada) {
+    throw new AttendanceError(preview.mensaje, 400);
+  }
+
+  return registerAttendanceEntryByCedula(cedula, creadoPorStaffId);
+};
+
 export const getAttendanceDashboard = async (): Promise<AttendanceDashboard> => {
   await ensureAttendanceSchemaReady();
 

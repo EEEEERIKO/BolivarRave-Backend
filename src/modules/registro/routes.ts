@@ -5,6 +5,7 @@ import {
   AttendanceError,
   getAttendanceDashboard,
   getAttendancePreviewByCedula,
+  registerAttendanceAutomaticallyByCedula,
   registerAttendanceEntryByCedula,
   registerAttendanceExitByCedula,
 } from "./service";
@@ -53,6 +54,27 @@ registroRouter.post("/entrada", requireAdminOrRegistroRole, async (req, res, nex
     const { cedula } = cedulaSchema.parse(req.body);
     const authUser = (req as AuthenticatedRequest).authUser;
     const result = await registerAttendanceEntryByCedula(cedula, authUser?.staffId ?? "");
+    return res.json(result);
+  } catch (error) {
+    if (error instanceof z.ZodError) {
+      return res.status(400).json({
+        error: `Payload invalido: ${error.issues[0]?.message ?? "error de validacion"}`,
+      });
+    }
+
+    if (error instanceof AttendanceError) {
+      return res.status(error.status).json({ error: error.message });
+    }
+
+    return next(error);
+  }
+});
+
+registroRouter.post("/auto", requireAdminOrRegistroRole, async (req, res, next) => {
+  try {
+    const { cedula } = cedulaSchema.parse(req.body);
+    const authUser = (req as AuthenticatedRequest).authUser;
+    const result = await registerAttendanceAutomaticallyByCedula(cedula, authUser?.staffId ?? "");
     return res.json(result);
   } catch (error) {
     if (error instanceof z.ZodError) {
