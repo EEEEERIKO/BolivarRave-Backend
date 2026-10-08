@@ -189,6 +189,13 @@ const balanceMovimientosQuerySchema = z.object({
   limit: z.coerce.number().int().min(1).max(200).optional(),
 });
 
+const actividadesRecientesQuerySchema = z.object({
+  desde: z.string().regex(dateRegex, "Fecha inicial invalida").nullable().optional(),
+  hasta: z.string().regex(dateRegex, "Fecha final invalida").nullable().optional(),
+  tipo: z.enum(["entrada", "salida", "limpieza"]).nullable().optional(),
+  limit: z.coerce.number().int().min(1).max(200).optional(),
+});
+
 const loginBodySchema = z.object({
   cedula: z.string().trim().min(5).max(20),
   portal: z.enum(["admin-monitor", "colaborador"]),
@@ -681,12 +688,18 @@ staffRouter.get("/:id", async (req, res, next) => {
 staffRouter.get("/:id/actividades-recientes", async (req, res, next) => {
   try {
     const { id } = idParamsSchema.parse(req.params);
+    const filters = actividadesRecientesQuerySchema.parse(req.query);
 
     if (!ensureCollaboradorSelfAccess(req, res, id)) {
       return;
     }
 
-    const actividades = await listStaffRecentActivities(id);
+    const actividades = await listStaffRecentActivities(id, {
+      ...(filters.desde !== undefined ? { fromDate: filters.desde } : {}),
+      ...(filters.hasta !== undefined ? { toDate: filters.hasta } : {}),
+      ...(filters.tipo !== undefined ? { type: filters.tipo } : {}),
+      ...(filters.limit !== undefined ? { limit: filters.limit } : {}),
+    });
     return res.json({ actividades });
   } catch (error) {
     if (error instanceof z.ZodError) {

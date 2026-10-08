@@ -1641,8 +1641,16 @@ export type StaffRecentActivity = {
   fecha: string;
 };
 
-export const listStaffRecentActivities = async (staffId: string): Promise<StaffRecentActivity[]> => {
+export const listStaffRecentActivities = async (
+  staffId: string,
+  options: { fromDate?: string | null; toDate?: string | null; type?: StaffRecentActivity["tipo"] | null; limit?: number } = {},
+): Promise<StaffRecentActivity[]> => {
   await ensureStaffSecuritySchemaReady();
+
+  const safeLimit = Number.isFinite(options.limit) ? Math.min(Math.max(Math.trunc(options.limit ?? 20), 1), 200) : 20;
+  const fromDate = options.fromDate ?? null;
+  const toDate = options.toDate ?? null;
+  const type = options.type ?? null;
 
   const rows = await prisma.$queryRaw<Array<{
     id: string;
@@ -1693,8 +1701,11 @@ export const listStaffRecentActivities = async (staffId: string): Promise<StaffR
       WHERE h.created_by_staff_id = ${staffId}::uuid
         AND h.action_type = 'salon_limpio'
     ) AS activity
+    WHERE (${fromDate}::date IS NULL OR (activity.momento AT TIME ZONE 'America/Bogota')::date >= ${fromDate}::date)
+      AND (${toDate}::date IS NULL OR (activity.momento AT TIME ZONE 'America/Bogota')::date <= ${toDate}::date)
+      AND (${type}::text IS NULL OR activity.tipo = ${type}::text)
     ORDER BY activity.momento DESC
-    LIMIT 5
+    LIMIT ${safeLimit}
   `;
 
   return rows.map((row) => ({
