@@ -29,6 +29,7 @@ type AttendanceMovementRawRow = {
   estado: string;
   fecha: string;
   hora: string;
+  hora_entrada_programada: string | null;
 };
 
 type ActiveStaffRawRow = {
@@ -819,7 +820,8 @@ export const getAttendanceDashboard = async (): Promise<AttendanceDashboard> => 
         movement.actividad,
         movement.estado,
         movement.fecha,
-        movement.hora
+        movement.hora,
+        movement.hora_entrada_programada
       FROM (
         SELECT
           CONCAT(r.id::text, '-entrada') AS id,
@@ -833,10 +835,13 @@ export const getAttendanceDashboard = async (): Promise<AttendanceDashboard> => 
           END AS estado,
           TO_CHAR((r.hora_entrada AT TIME ZONE ${COLOMBIA_TIMEZONE}), 'YYYY-MM-DD') AS fecha,
           TO_CHAR((r.hora_entrada AT TIME ZONE ${COLOMBIA_TIMEZONE}), 'HH24:MI:SS') AS hora,
+          TO_CHAR(j.hora_entrada, 'HH24:MI:SS') AS hora_entrada_programada,
           r.hora_entrada AS momento
         FROM public.staff_registros_asistencia r
         INNER JOIN public.staff s ON s.id = r.staff_id
-        WHERE r.hora_entrada IS NOT NULL
+        INNER JOIN public.staff_jornada_semanal j ON j.id = r.jornada_id
+        WHERE r.fecha = ${today.dateKey}::date
+          AND r.hora_entrada IS NOT NULL
 
         UNION ALL
 
@@ -852,10 +857,13 @@ export const getAttendanceDashboard = async (): Promise<AttendanceDashboard> => 
           END AS estado,
           TO_CHAR((r.hora_salida AT TIME ZONE ${COLOMBIA_TIMEZONE}), 'YYYY-MM-DD') AS fecha,
           TO_CHAR((r.hora_salida AT TIME ZONE ${COLOMBIA_TIMEZONE}), 'HH24:MI:SS') AS hora,
+          TO_CHAR(j.hora_entrada, 'HH24:MI:SS') AS hora_entrada_programada,
           r.hora_salida AS momento
         FROM public.staff_registros_asistencia r
         INNER JOIN public.staff s ON s.id = r.staff_id
-        WHERE r.hora_salida IS NOT NULL
+        INNER JOIN public.staff_jornada_semanal j ON j.id = r.jornada_id
+        WHERE r.fecha = ${today.dateKey}::date
+          AND r.hora_salida IS NOT NULL
       ) AS movement
       ORDER BY movement.momento DESC
       LIMIT 30
@@ -892,6 +900,7 @@ export const getAttendanceDashboard = async (): Promise<AttendanceDashboard> => 
       estado: row.estado,
       fecha: row.fecha,
       hora: row.hora,
+      horaEntradaProgramada: row.hora_entrada_programada,
     })),
     usuariosActivos: activeRows.map((row) => ({
       id: row.id,
