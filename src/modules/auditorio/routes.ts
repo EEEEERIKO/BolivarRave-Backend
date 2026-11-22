@@ -1,4 +1,5 @@
 import { Router } from "express";
+import rateLimit from "express-rate-limit";
 import { z } from "zod";
 import { requireAdminOrMonitorRole, requireAdminRole, requireAuthToken, type AuthenticatedRequest } from "../../lib/auth";
 import { broadcastScheduleRefresh } from "../../lib/websocket";
@@ -19,8 +20,20 @@ import {
   sendAuditorioReservaRechazadaEmail,
   sendAuditorioSolicitudRegistradaEmail,
 } from "./email";
+import { getResponseCache, setResponseCache } from "../../lib/response-cache";
 
 export const auditorioRouter = Router();
+
+// Public reservation creation can trigger database writes and email delivery.
+// Keep it separate from authenticated traffic so it cannot be used as a cheap
+// egress/write amplification endpoint.
+const publicReservationLimiter = rateLimit({
+  windowMs: 15 * 60 * 1000,
+  limit: 20,
+  standardHeaders: true,
+  legacyHeaders: false,
+  message: { error: "Demasiadas solicitudes. Intenta nuevamente más tarde." },
+});
 
 const dateRegex = /^\d{4}-\d{2}-\d{2}$/;
 const timeRegex = /^\d{2}:\d{2}$/;
@@ -47,7 +60,7 @@ const reservaBodySchema = z.object({
   solicitanteNombre: z.string().trim().min(1).max(200).optional().nullable(),
   solicitanteTelefono: z.string().trim().min(5).max(60).optional().nullable(),
   estado: z.enum(["Pendiente", "Aprobada", "Cancelada"]).default("Pendiente"),
-  horarios: z.array(horarioSchema).min(1),
+  horarios: z.array(horarioSchema).min(1).max(100),
 });
 
 const publicReservaBodySchema = z.object({
@@ -65,7 +78,7 @@ const publicReservaBodySchema = z.object({
   observaciones: z.string().trim().max(4000).optional().nullable(),
   solicitanteNombre: z.string().trim().min(1).max(200),
   solicitanteTelefono: z.string().trim().min(5).max(60),
-  horarios: z.array(horarioSchema).min(1),
+  horarios: z.array(horarioSchema).min(1).max(100),
 });
 
 const idParamsSchema = z.object({
@@ -265,17 +278,27 @@ const sendAuditorioNotification = async (
 
 auditorioRouter.get("/reservas", async (_req, res, next) => {
   try {
+    const cached = getResponseCache<{ reservas: Awaited<ReturnType<typeof listReservasAuditorio>> }>("auditorio:list");
+    if (cached) return res.json(cached);
+
     const reservas = await listReservasAuditorio();
-    return res.json({ reservas });
+    const payload = { reservas };
+    setResponseCache("auditorio:list", payload);
+    return res.json(payload);
   } catch (error) {
     return next(error);
   }
 });
 
-auditorioRouter.get("/public/reservas", async (_req, res, next) => {
+auditorioRouter.get("/public/reservas", publicReservationLimiter, async (_req, res, next) => {
   try {
+    const cached = getResponseCache<{ reservas: ReturnType<typeof toPublicReserva>[] }>("auditorio:public-list");
+    if (cached) return res.json(cached);
+
     const reservas = await listReservasAuditorio();
-    return res.json({ reservas: reservas.map(toPublicReserva) });
+    const payload = { reservas: reservas.map(toPublicReserva) };
+    setResponseCache("auditorio:public-list", payload);
+    return res.json(payload);
   } catch (error) {
     return next(error);
   }
@@ -364,7 +387,7 @@ auditorioRouter.post("/reservas", async (req, res, next) => {
   }
 });
 
-auditorioRouter.post("/public/reservas", async (req, res, next) => {
+auditorioRouter.post("/public/reservas", publicReservationLimiter, async (req, res, next) => {
   try {
     const rawEmail = typeof req.body?.correo === "string" ? req.body.correo.trim() : "";
     console.log("[auditorio] POST /public/reservas recibido", {

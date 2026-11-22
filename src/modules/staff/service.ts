@@ -151,7 +151,7 @@ type StaffRefreshTokenRow = {
   revoked_at: string | null;
 };
 
-const REFRESH_TOKEN_TTL_DAYS = Math.max(7, Number.parseInt(process.env.AUTH_REFRESH_TOKEN_TTL_DAYS ?? "3650", 10) || 3650);
+const REFRESH_TOKEN_TTL_DAYS = Math.max(7, Number.parseInt(process.env.AUTH_REFRESH_TOKEN_TTL_DAYS ?? "120", 10) || 120);
 
 export class StaffAuthError extends Error {
   readonly status: number;
@@ -618,6 +618,14 @@ export const createStaffRefreshToken = async (payload: {
   userAgent?: string | null;
 }) => {
   await ensureStaffSessionSchemaReady();
+
+  // Expired and revoked sessions are not useful for authentication and should
+  // not accumulate indefinitely in the database.
+  await prisma.$executeRaw`
+    DELETE FROM public.staff_refresh_tokens
+    WHERE expires_at < now()
+       OR (revoked_at IS NOT NULL AND revoked_at < now() - interval '30 days')
+  `;
 
   const token = randomBytes(48).toString("base64url");
   const tokenHash = hashRefreshToken(token);
