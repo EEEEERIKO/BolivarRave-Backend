@@ -24,21 +24,27 @@ const ADMIN_API_KEY = (process.env.ADMIN_API_KEY ?? "").trim();
 const corsOriginsRaw = process.env.CORS_ORIGINS ?? process.env.CORS_ORIGIN;
 const normalizeOrigin = (origin: string) => origin.trim().replace(/\/+$/, "");
 const alwaysAllowedOrigins = [
+  "https://administracion-bolivar-rave.vercel.app",
+];
+const developmentOrigins = [
   "http://localhost:3000",
   "http://localhost:3001",
   "http://127.0.0.1:3000",
   "http://127.0.0.1:3001",
-  "https://administracion-bolivar-rave.vercel.app",
 ];
 const configuredOrigins = (corsOriginsRaw ?? "")
   .split(",")
   .map((origin) => normalizeOrigin(origin))
   .filter(Boolean);
-const allowedOrigins = Array.from(new Set([...alwaysAllowedOrigins, ...configuredOrigins].map((origin) => normalizeOrigin(origin))));
+const allowedOrigins = Array.from(new Set([
+  ...alwaysAllowedOrigins,
+  ...configuredOrigins,
+  ...(isProduction ? [] : developmentOrigins),
+].map((origin) => normalizeOrigin(origin))));
 const localOriginPattern = /^https?:\/\/(localhost|127\.0\.0\.1|192\.168\.\d{1,3}\.\d{1,3})(:\d+)?$/i;
 const isOriginAllowed = (origin?: string) => {
   if (!origin) return true;
-  if (localOriginPattern.test(origin.trim())) return true;
+  if (!isProduction && localOriginPattern.test(origin.trim())) return true;
   return allowedOrigins.includes(normalizeOrigin(origin));
 };
 
@@ -77,7 +83,7 @@ app.use(
 app.use(
   rateLimit({
     windowMs: 15 * 60 * 1000,
-    max: isProduction ? 600 : 5000,
+    max: isProduction ? 300 : 5000,
     standardHeaders: true,
     legacyHeaders: false,
   })

@@ -17,6 +17,7 @@ import {
 } from "./service";
 import { prisma } from "../../lib/prisma";
 import { sendReservationConfirmationEmail } from "./email";
+import { getResponseCache, setResponseCache } from "../../lib/response-cache";
 
 export const reservasRouter = Router();
 
@@ -127,8 +128,13 @@ reservasRouter.use(async (_req, _res, next) => {
 
 reservasRouter.get("/", requireAdminOrMonitorRole, async (_req, res, next) => {
   try {
+    const cached = getResponseCache<{ reservas: Awaited<ReturnType<typeof listReservationRequests>> }>("reservas:list");
+    if (cached) return res.json(cached);
+
     const reservas = await listReservationRequests();
-    return res.json({ reservas });
+    const payload = { reservas };
+    setResponseCache("reservas:list", payload);
+    return res.json(payload);
   } catch (error) {
     return next(error);
   }
